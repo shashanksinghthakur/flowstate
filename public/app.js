@@ -244,11 +244,264 @@ const VIEWS = {
   },
 };
 
-function route() { const h = location.hash.slice(1); return VIEWS[h] ? h : 'overview'; }
+
+// ------------------------------------------------------------ Flow Scope (flagship instrument)
+const LENSES = [['chains', 'Chains', 'All chains'], ['platforms', 'Platforms', 'All platforms'], ['assets', 'Assets', 'Crypto narratives'], ['regions', 'Regions', 'BTC · ETH · SOL spot']];
+const LENS_ANGLES = [-120, -40, 40, 120];
+const LENS_W = { chains: ['d1', 'd7', 'd30'], platforms: ['d1', 'd7'], assets: ['d1'], regions: ['d1', 'd7', 'd30'] };
+const WINS = [['d1', '24h'], ['d7', '7d'], ['d30', '30d']];
+const DETAIL = [6, 8, 12];
+const FM = { lens: 'chains', w: 'd7', n: 8, trail: [], cache: {}, req: 0, last: null, ang: 0 };
+const fmNode = () => FM.trail.at(-1)?.id || FM.lens;
+const lensIdx = () => LENSES.findIndex(([k]) => k === FM.lens);
+const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function knobHTML(li) {
+  const ridges = Array.from({ length: 40 }, (_, i) => `<line x1="60" y1="17" x2="60" y2="23" transform="rotate(${i * 9} 60 60)"/>`).join('');
+  const marks = LENS_ANGLES.map((a) => `<line x1="60" y1="3" x2="60" y2="9" transform="rotate(${a} 60 60)"/>`).join('');
+  const labels = LENSES.map(([k, l], i) => {
+    const a = (LENS_ANGLES[i] * Math.PI) / 180;
+    return `<button class="knob-label${i === li ? ' on' : ''}" data-lens="${k}" style="left:${(100 + Math.sin(a) * 84).toFixed(1)}px;top:${(84 - Math.cos(a) * 76).toFixed(1)}px">${l}</button>`;
+  }).join('');
+  return `<div class="knob-wrap">${labels}
+    <div class="knob" role="slider" tabindex="0" aria-label="Lens" aria-valuemin="0" aria-valuemax="3" aria-valuenow="${li}" aria-valuetext="${LENSES[li][1]}">
+      <svg viewBox="0 0 120 120" aria-hidden="true">
+        <defs><radialGradient id="kg" cx="38%" cy="30%" r="75%"><stop offset="0" stop-color="#55565b"/><stop offset=".55" stop-color="#2c2d30"/><stop offset="1" stop-color="#18191b"/></radialGradient>
+        <radialGradient id="kf" cx="50%" cy="40%" r="60%"><stop offset="0" stop-color="#3b3c40"/><stop offset="1" stop-color="#232427"/></radialGradient></defs>
+        <g class="marks">${marks}</g>
+        <circle cx="60" cy="62" r="45" class="shadow"/>
+        <g class="cap" style="transform:rotate(${LENS_ANGLES[li]}deg)">
+          <circle cx="60" cy="60" r="45" fill="url(#kg)"/><g class="ridges">${ridges}</g>
+          <circle cx="60" cy="60" r="31" fill="url(#kf)" class="face"/><line class="pointer" x1="60" y1="33" x2="60" y2="47"/>
+        </g>
+      </svg>
+    </div></div>`;
+}
+
+function switchHTML(name, opts, cur, enabled, label) {
+  const i = Math.max(0, opts.findIndex(([k]) => String(k) === String(cur)));
+  return `<div class="switch" role="radiogroup" aria-label="${label}" style="--n:${opts.length}">${opts.map(([k, l]) => `<button role="radio" aria-checked="${String(k) === String(cur)}" data-${name}="${k}" ${enabled.includes(k) ? '' : 'disabled'}>${l}</button>`).join('')}<span class="thumb" style="--i:${i}"></span></div>`;
+}
+
+function trailHTML() {
+  const root = LENSES[lensIdx()];
+  const items = [{ id: root[0], title: root[2] }, ...FM.trail];
+  return items.map((t, i) => i === items.length - 1
+    ? `<span class="crumb now" aria-current="step">${esc(t.title)}</span>`
+    : `<button class="crumb" data-crumb="${i}">${esc(t.title)}</button><span class="sep" aria-hidden="true">›</span>`).join('');
+}
+
+VIEWS.flowmap = function () {
+  const li = lensIdx();
+  return `<h1 class="sr-only">Flow scope: where money moved</h1>
+  <section class="scope" aria-label="Flow scope">
+    <span class="screw tl"></span><span class="screw tr"></span><span class="screw bl"></span><span class="screw br"></span>
+    <div class="scope-top">
+      <div class="scope-name"><span class="led ${S.live ? 'on' : 'demo'}" title="${S.live ? 'Live data' : 'Demo data'}"></span>Flow scope</div>
+      <nav class="trail" id="fmTrail" aria-label="Trace path">${trailHTML()}</nav>
+    </div>
+    <div class="scope-body">
+      <div class="controls">
+        <div class="ctl ctl-knob">${knobHTML(li)}<div class="engrave">Lens</div></div>
+        <div class="ctl"><div id="fmWin">${switchHTML('win', WINS, FM.w, LENS_W[FM.lens], 'Time window')}</div><div class="engrave">Window</div></div>
+        <div class="ctl"><div id="fmDet">${switchHTML('n', DETAIL.map((v) => [v, String(v)]), FM.n, DETAIL, 'Bands per side')}</div><div class="engrave">Bands per side</div></div>
+      </div>
+      <div class="screen" id="fmScreen">
+        <div class="screen-labels"><span id="fmL"></span><span id="fmC"></span><span id="fmR"></span></div>
+        <svg id="fmsvg" role="img" aria-label="Flow diagram"></svg>
+        <div class="screen-msg" id="fmMsg" hidden></div>
+        <div class="screen-foot"><span><i class="sw solid"></i>Measured</span><span><i class="sw est"></i>Estimated</span><span class="hint">Tap a band or a name to trace where it goes next</span></div>
+      </div>
+      <aside class="readout" id="fmRead" aria-live="polite"></aside>
+    </div>
+    <p class="scope-notes" id="fmNotes"></p>
+  </section>`;
+};
+
+function gaugeHTML(g, fromAng) {
+  const v = Math.max(g.min, Math.min(g.max, Number(g.value) || 0));
+  const ang = -90 + ((v - g.min) / (g.max - g.min)) * 180;
+  const ticks = Array.from({ length: 21 }, (_, i) => { const a = -90 + i * 9; const long = i % 5 === 0; return `<line x1="80" y1="${long ? 14 : 18}" x2="80" y2="24" transform="rotate(${a} 80 84)" class="${long ? 'long' : ''}"/>`; }).join('');
+  const unit = g.label.includes('bps') || g.label.includes('premium') ? ' bps' : '%';
+  const shown = `${g.value >= 0 ? '+' : '−'}${Math.abs(g.value).toFixed(Math.abs(g.value) < 10 ? 2 : 1)}${unit}`;
+  return `<div class="gauge"><svg viewBox="0 0 160 96" role="img" aria-label="${esc(g.label)}: ${shown}">
+    <path d="M 14 84 A 66 66 0 0 1 80 18" class="arc out"/><path d="M 80 18 A 66 66 0 0 1 146 84" class="arc in"/>
+    <g class="ticks">${ticks}</g>
+    <text x="14" y="95" class="gl">${g.min}</text><text x="146" y="95" class="gl" text-anchor="end">+${g.max}</text><text x="80" y="95" class="gl" text-anchor="middle">0</text>
+    <g class="needle" data-ang="${ang.toFixed(1)}" style="transform:rotate(${fromAng}deg)"><line x1="80" y1="84" x2="80" y2="24"/></g><circle cx="80" cy="84" r="5.5" class="hub"/>
+  </svg><div class="g-lab">${esc(g.label)} <b class="${cls(g.value)}">${shown}</b></div></div>`;
+}
+
+function readoutHTML(d) {
+  const r = d.readout || {};
+  const netTxt = r.net == null ? '–' : r.unit === 'bps' ? `${r.net >= 0 ? '+' : '−'}${Math.abs(r.net).toFixed(1)}` : money(r.net, true);
+  const stats = [...(r.base != null ? [[r.baseLabel, money(r.base)]] : []), ...(r.extra || [])];
+  return `<div class="ro-kind">${esc(d.kind || '')}</div><div class="ro-title">${esc(d.title || '')}</div>
+    <div class="lcd"><div class="lcd-num ${cls(r.net)}">${netTxt}</div><div class="lcd-lab">${esc(r.netLabel || '')}</div></div>
+    ${r.gauge ? gaugeHTML(r.gauge, FM.ang) : ''}
+    ${stats.length ? `<dl class="ro-stats">${stats.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}</dl>` : ''}
+    <p class="ro-head">${esc(r.headline || '')}</p>
+    <p class="ro-src">${esc(d.source || '')}. Updated ${ago(d.updated || Date.now())}.</p>`;
+}
+
+function drawFlow(d) {
+  FM.last = d;
+  const svg = $('#fmsvg'); if (!svg) return;
+  $('#fmMsg').hidden = true;
+  $('#fmL').textContent = d.leftLabel || ''; $('#fmR').textContent = d.rightLabel || ''; $('#fmC').textContent = d.title || '';
+  const L = (d.left || []).filter((x) => x.value > 0), R = (d.right || []).filter((x) => x.value > 0);
+  const Wd = Math.max(300, svg.parentElement.clientWidth - 2);
+  const narrow = Wd < 600;
+  const rows = Math.max(L.length, R.length, 1);
+  const A = Math.max(200, rows * (narrow ? 30 : 36));       // proportional pool height
+  const minSlot = narrow ? 32 : 36, gap = 6, pad = 14;
+  const slots = (items) => { const tot = items.reduce((t, x) => t + x.value, 0) || 1; return items.map((x) => { const share = x.value / tot; return { ...x, share, bh: Math.max(2, share * A), slot: Math.max(minSlot, share * A) }; }); };
+  const Ls = slots(L), Rs = slots(R);
+  const sideH = (a) => a.reduce((t, x) => t + x.slot, 0) + gap * Math.max(0, a.length - 1);
+  const H = Math.round(Math.max(A, sideH(Ls), sideH(Rs)) + pad * 2);
+  const place = (a) => { let y = pad + (H - 2 * pad - sideH(a)) / 2; return a.map((x) => { const o = { ...x, sy: y, by: y + (x.slot - x.bh) / 2 }; y += x.slot + gap; return o; }); };
+  const Lp = place(Ls), Rp = place(Rs);
+  const cTop = (H - A) / 2;
+  const attach = (a) => { let y = cTop; return a.map((o) => { const r = { ...o, cy: y }; y += o.bh; return r; }); };
+  const La = attach(Lp), Ra = attach(Rp);
+  const labW = narrow ? 92 : 170, bar = 7, cw = narrow ? 12 : 16;
+  const xL = labW, xR = Wd - labW - bar, cx0 = Wd / 2 - cw / 2, cx1 = Wd / 2 + cw / 2;
+  const rib = (x1, y1, x2, y2, h) => { const m = (x1 + x2) / 2; return `M${x1},${y1}C${m},${y1} ${m},${y2} ${x2},${y2}L${x2},${y2 + h}C${m},${y2 + h} ${m},${y1 + h} ${x1},${y1 + h}Z`; };
+  const mid = (x1, y1, x2, y2) => { const m = (x1 + x2) / 2; return `M${x1},${y1}C${m},${y1} ${m},${y2} ${x2},${y2}`; };
+  const maxCh = narrow ? 12 : 22;
+  const clip = (t) => (t.length > maxCh ? t.slice(0, maxCh - 1) + '…' : t);
+  const tip = (o) => `${o.label}${o.sub ? ` (${o.sub})` : ''}\n${money(o.value)}  ${(o.share * 100).toFixed(1)}% of side\n${o.method === 'estimated' ? 'Estimated' : 'Measured'}${o.id ? '\nSelect to trace' : ''}`;
+  const motion = !reduceMotion();
+  const band = (o, x1, y1, x2, y2, i) => {
+    const dur = (1.1 + (1 - o.share) * 2.6).toFixed(2), sw = Math.max(1.4, Math.min(3.4, o.bh * 0.2)).toFixed(1);
+    return `<g class="band ${o.tone || 'neutral'} ${o.method}${o.id ? ' drill' : ''}" ${o.id ? `data-drill="${esc(o.id)}" data-title="${esc(o.label)}" tabindex="0" role="button" aria-label="Trace ${esc(o.label)}"` : ''} data-tip="${esc(tip(o))}" style="--d:${i * 40}ms">
+      <path class="rib" d="${rib(x1, y1, x2, y2, o.bh)}"/>${o.method === 'estimated' ? `<path class="hat" d="${rib(x1, y1, x2, y2, o.bh)}"/>` : ''}
+      ${motion ? `<path class="pt" d="${mid(x1, y1 + o.bh / 2, x2, y2 + o.bh / 2)}" style="animation-duration:${dur}s;stroke-width:${sw}px"/>` : ''}</g>`;
+  };
+  const label = (o, x, anchor) => `<g class="nlab${o.id ? ' drill' : ''}" ${o.id ? `data-drill="${esc(o.id)}" data-title="${esc(o.label)}"` : ''} data-tip="${esc(tip(o))}">
+    <text x="${x}" y="${o.sy + o.slot / 2 - 3}" text-anchor="${anchor}" class="lab">${esc(clip(o.label))}</text>
+    <text x="${x}" y="${o.sy + o.slot / 2 + 11}" text-anchor="${anchor}" class="val">${money(o.value)}${o.sub && !narrow ? `  ${esc(o.sub)}` : ''}</text></g>`;
+  let g = `<defs><pattern id="hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1.6" height="5" fill="rgba(240,239,236,.16)"/></pattern></defs>`;
+  La.forEach((o, i) => { g += band(o, xL + bar, o.by, cx0, o.cy, i); });
+  Ra.forEach((o, i) => { g += band(o, cx1, o.cy, xR, o.by, i + La.length); });
+  La.forEach((o) => { g += `<rect class="node ${o.tone || 'neutral'}" x="${xL}" y="${o.by}" width="${bar}" height="${o.bh}" rx="1.5"/>${label(o, xL - 8, 'end')}`; });
+  Ra.forEach((o) => { g += `<rect class="node ${o.tone || 'neutral'}" x="${xR}" y="${o.by}" width="${bar}" height="${o.bh}" rx="1.5"/>${label(o, xR + bar + 8, 'start')}`; });
+  g += `<rect class="core" x="${cx0}" y="${cTop}" width="${cw}" height="${A}" rx="4"/>`;
+  if (!L.length && !R.length) g += `<text x="${Wd / 2}" y="${H / 2}" text-anchor="middle" class="lab">No movement above the threshold in this window.</text>`;
+  else if (!R.length) g += `<text x="${(cx1 + Wd) / 2}" y="${H / 2}" text-anchor="middle" class="val">End of trace. Details in the readout.</text>`;
+  svg.setAttribute('viewBox', `0 0 ${Wd} ${H}`); svg.style.height = `${H}px`;
+  svg.innerHTML = g;
+  const ro = $('#fmRead');
+  ro.innerHTML = readoutHTML(d);
+  const nd = ro.querySelector('.needle');
+  if (nd) requestAnimationFrame(() => requestAnimationFrame(() => { nd.style.transform = `rotate(${nd.dataset.ang}deg)`; FM.ang = Number(nd.dataset.ang); }));
+  $('#fmNotes').textContent = (d.notes || []).join(' ');
+  $('#fmScreen').classList.remove('busy');
+}
+
+function fmMessage(t) { const m = $('#fmMsg'); if (m) { m.textContent = t; m.hidden = false; } }
+
+async function loadFlow() {
+  const node = fmNode(), key = `${node}|${FM.w}|${FM.n}`, rq = ++FM.req;
+  const hit = FM.cache[key];
+  if (hit) drawFlow(hit.d); else { $('#fmScreen')?.classList.add('busy'); }
+  if (hit && Date.now() - hit.t < 60_000) return;
+  try {
+    let d;
+    if (S.live) {
+      const r = await fetch(`${API}/api/flow?node=${encodeURIComponent(node)}&w=${FM.w}&n=${FM.n}`, { cache: 'no-store' });
+      d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || r.status);
+    } else d = demoFlow(node);
+    FM.cache[key] = { t: Date.now(), d };
+    if (rq === FM.req) { const t = FM.trail.at(-1); if (t && t.id === node && d.title && t.title !== d.title) { t.title = d.title; $('#fmTrail').innerHTML = trailHTML(); } drawFlow(d); }
+  } catch (e) {
+    if (rq === FM.req) { $('#fmScreen')?.classList.remove('busy'); if (!hit) fmMessage(`This layer could not load: ${e.message}. It retries on the next refresh.`); }
+  }
+}
+
+function syncControls() {
+  const li = lensIdx();
+  const knob = $('.knob'); if (!knob) return;
+  knob.querySelector('.cap').style.transform = `rotate(${LENS_ANGLES[li]}deg)`;
+  knob.setAttribute('aria-valuenow', li); knob.setAttribute('aria-valuetext', LENSES[li][1]);
+  document.querySelectorAll('.knob-label').forEach((b) => b.classList.toggle('on', b.dataset.lens === FM.lens));
+  $('#fmWin').innerHTML = switchHTML('win', WINS, FM.w, LENS_W[FM.lens], 'Time window');
+  $('#fmDet').innerHTML = switchHTML('n', DETAIL.map((v) => [v, String(v)]), FM.n, DETAIL, 'Bands per side');
+  $('#fmTrail').innerHTML = trailHTML();
+}
+
+function setLens(k) {
+  if (k === FM.lens && !FM.trail.length) return;
+  FM.lens = k; FM.trail = [];
+  if (!LENS_W[k].includes(FM.w)) FM.w = LENS_W[k].includes('d7') ? 'd7' : LENS_W[k][0];
+  syncControls(); loadFlow();
+}
+function drillTo(id, title) {
+  if (LENSES.some(([k]) => k === id)) { FM.lens = id; FM.trail = []; }
+  else {
+    const at = FM.trail.findIndex((t) => t.id === id);
+    if (at >= 0) FM.trail = FM.trail.slice(0, at + 1); else FM.trail.push({ id, title });
+  }
+  syncControls(); loadFlow();
+}
+
+let fmRO = null;
+function mountFlow() {
+  const knob = $('.knob'); if (!knob) return;
+  const step = (dir) => setLens(LENSES[Math.max(0, Math.min(3, lensIdx() + dir))][0]);
+  const fromPointer = (e) => {
+    const r = knob.getBoundingClientRect();
+    const a = (Math.atan2(e.clientX - (r.left + r.width / 2), -(e.clientY - (r.top + r.height / 2))) * 180) / Math.PI;
+    let best = 0; LENS_ANGLES.forEach((d, i) => { if (Math.abs(d - a) < Math.abs(LENS_ANGLES[best] - a)) best = i; });
+    setLens(LENSES[best][0]);
+  };
+  knob.addEventListener('pointerdown', (e) => { knob.setPointerCapture(e.pointerId); fromPointer(e); });
+  knob.addEventListener('pointermove', (e) => { if (knob.hasPointerCapture(e.pointerId)) fromPointer(e); });
+  knob.addEventListener('wheel', (e) => { e.preventDefault(); step(e.deltaY > 0 ? 1 : -1); }, { passive: false });
+  knob.addEventListener('keydown', (e) => {
+    if (['ArrowRight', 'ArrowUp'].includes(e.key)) { e.preventDefault(); step(1); }
+    if (['ArrowLeft', 'ArrowDown'].includes(e.key)) { e.preventDefault(); step(-1); }
+    if (e.key === 'Home') setLens(LENSES[0][0]); if (e.key === 'End') setLens(LENSES[3][0]);
+  });
+  const svg = $('#fmsvg');
+  svg.addEventListener('keydown', (e) => { const g = e.target.closest?.('[data-drill]'); if (g && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); drillTo(g.dataset.drill, g.dataset.title); } });
+  fmRO?.disconnect();
+  let t = 0;
+  fmRO = new ResizeObserver(() => { clearTimeout(t); t = setTimeout(() => FM.last && drawFlow(FM.last), 120); });
+  fmRO.observe($('#fmScreen'));
+  if (FM.last) drawFlow(FM.last);
+  loadFlow();
+}
+
+document.addEventListener('click', (e) => {
+  const lens = e.target.closest('[data-lens]'); if (lens) return setLens(lens.dataset.lens);
+  const win = e.target.closest('[data-win]'); if (win && !win.disabled) { FM.w = win.dataset.win; syncControls(); return loadFlow(); }
+  const det = e.target.closest('[data-n]'); if (det) { FM.n = Number(det.dataset.n); syncControls(); return loadFlow(); }
+  const crumb = e.target.closest('[data-crumb]'); if (crumb) { FM.trail = FM.trail.slice(0, Number(crumb.dataset.crumb)); syncControls(); return loadFlow(); }
+  const dr = e.target.closest('#fmsvg [data-drill]'); if (dr) { tip.classList.remove('on'); return drillTo(dr.dataset.drill, dr.dataset.title); }
+});
+
+function demoFlow(node) {
+  const rnd2 = (seed) => { let x = [...seed].reduce((a, c) => a + c.charCodeAt(0), 7); return () => ((x = (x * 9301 + 49297) % 233280) / 233280); };
+  const r = rnd2(node + FM.w);
+  const names = { chains: ['Ethereum', 'Tron', 'Solana', 'BSC', 'Arbitrum', 'Base', 'Hyperliquid', 'Plasma', 'Avalanche', 'Polygon'], platforms: ['Aave', 'Lido', 'EigenLayer', 'Ethena', 'Hyperliquid Bridge', 'Morpho', 'Pendle', 'Sky', 'Uniswap', 'Jupiter'], assets: ['AI', 'RWA', 'Memecoins', 'DeFi', 'Layer 1', 'Layer 2', 'DePIN', 'Gaming'], regions: ['Asia hours', 'Europe hours', 'Americas hours', 'US spot crypto ETFs'] };
+  const pool = names[node] || ['Ethereum', 'Arbitrum', 'Base', 'Aave', 'Uniswap', 'Pendle', 'Morpho', 'GMX'];
+  const left = [], right = [];
+  pool.forEach((l) => { const v = (r() - 0.45) * 9e8; (v < 0 ? left : right).push({ id: null, label: l, value: Math.abs(v), method: r() > 0.6 ? 'estimated' : 'measured', tone: v < 0 ? 'out' : 'in' }); });
+  const net = right.reduce((t, x) => t + x.value, 0) - left.reduce((t, x) => t + x.value, 0);
+  return { title: LENSES.find(([k]) => k === node)?.[2] || node, kind: 'Demo data', leftLabel: 'Sources', rightLabel: 'Destinations', left, right, updated: Date.now(),
+    readout: { net, netLabel: 'Net flow (simulated)', base: 2.9e11, baseLabel: 'Base', gauge: { value: (r() - 0.5) * 3, min: -2, max: 2, label: 'Absorption' }, headline: 'Simulated numbers. Deploy the server to see live flows.' },
+    notes: ['Demo mode: every value here is simulated.'], source: 'Demo' };
+}
+
+function route() { const h = location.hash.slice(1); return VIEWS[h] ? h : 'flowmap'; }
 function render() {
   const r = route();
   document.querySelectorAll('#tabs a').forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + r));
+  if (r === 'flowmap' && $('#fmsvg') && !render.force) { $('#updated').textContent = S.updated ? `updated ${ago(S.updated)}` : 'loading…'; loadFlow(); return; }
   $('#view').innerHTML = VIEWS[r]();
+  if (r === 'flowmap') mountFlow();
   paintTape();
   $('#updated').textContent = S.updated ? `updated ${ago(S.updated)}` : 'loading…';
 }
@@ -366,6 +619,7 @@ setInterval(() => { if (S.updated) $('#updated').textContent = `updated ${ago(S.
   } else {
     connectBinance();
   }
+  render();
   await refresh();
   if (S.live) setInterval(refresh, REFRESH_MS);
 })();

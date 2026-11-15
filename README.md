@@ -4,10 +4,21 @@ Shows where money is moving across crypto sectors (AI, RWA, memecoins, DeFi, L1/
 
 Zero dependencies. Node 18+.
 
+## Flow scope (landing page)
+An instrument for tracing money through four lenses, chosen with the dial:
+- **Chains:** net stablecoin dollars in and out of each chain, plus issuer mints/redemptions.
+- **Platforms:** TVL moving between DeFi platforms.
+- **Assets:** market-cap rotation between crypto narratives.
+- **Regions:** Binance buy/sell pressure grouped by Asia, Europe and Americas trading hours, plus the Coinbase premium.
+
+Tap any band to make it the centre and see where that money came from and went next. Example trace: Arbitrum → Hyperliquid Bridge → Hyperliquid perps → BTC.
+Solid bands are measured balance changes. Hatched bands are estimates (TVL changes include price moves). API: `/api/flow?node=chain:Arbitrum&w=d7&n=8`.
+
 ## Run locally
 ```bash
 node server.js          # http://localhost:8787
-npm test                # parser tests against fixture payloads
+npm test                # parser, provider and flow tests against fixtures
+npm run dev             # full app on :8790 with fixture data, no network
 ```
 If the page can't reach `/api/health`, it falls back to **demo mode** and shows a banner saying so.
 
