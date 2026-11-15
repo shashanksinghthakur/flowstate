@@ -17,7 +17,7 @@ Solid bands are measured balance changes. Hatched bands are estimates (TVL chang
 ## Run locally
 ```bash
 node server.js          # http://localhost:8787
-npm test                # parser, provider and flow tests against fixtures
+npm test                # parser, provider, flow and alert tests against fixtures
 npm run dev             # full app on :8790 with fixture data, no network
 ```
 If the page can't reach `/api/health`, it falls back to **demo mode** and shows a banner saying so.
@@ -26,6 +26,25 @@ If the page can't reach `/api/health`, it falls back to **demo mode** and shows 
 - **Render:** push this folder to GitHub, then New → Blueprint. Render reads `render.yaml`.
 - **Railway / Fly / any VPS:** `node server.js`. Railway and Fly can also build the included `Dockerfile`.
 - **Docker:** `docker build -t flowstate . && docker run -p 8787:8787 flowstate`
+
+## Accounts, newsletter and alerts setup
+
+### Supabase (login, onboarding answers, newsletter list), about 10 minutes
+1. Create a free project at supabase.com.
+2. SQL Editor → New query → paste `supabase/schema.sql` → Run.
+3. Authentication → URL Configuration: set **Site URL** to your Render URL and add the same URL under **Redirect URLs**.
+4. Project Settings → API: copy the Project URL, the `anon` key and the `service_role` key into Render as `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
+5. Supabase's built-in email sender is rate-limited and meant for testing. Before launch, add a custom SMTP sender under Authentication → SMTP Settings (for example Resend).
+
+Export the newsletter list any time: `https://<your-site>/api/admin/subscribers.csv?token=<ADMIN_TOKEN>` (Render generates `ADMIN_TOKEN`; find it under Environment).
+
+### Telegram alert channel, about 5 minutes
+1. In Telegram, message @BotFather, send `/newbot`, and copy the token into `TELEGRAM_BOT_TOKEN`.
+2. Create a public channel (e.g. `@flowstate_alerts`). Add the bot as an admin with permission to post.
+3. Set `TELEGRAM_CHAT_ID` to `@flowstate_alerts` and `TELEGRAM_CHANNEL_URL` to `https://t.me/flowstate_alerts`.
+4. Test: open `https://<your-site>/api/admin/alert?token=<ADMIN_TOKEN>` with a POST (or `kind=digest` for the daily digest).
+
+Alerts posted: stablecoin mint/redemption waves over $500M, chain swings over $300M, Hyperliquid bridge moves over $100M (all 24h), Coinbase whale bursts over $5M, Coinbase premium beyond ±15 bps, and a daily digest at 13:00 UTC. Tune with `ALERT_WHALE_MIN_USD` and `ALERT_DIGEST_HOUR_UTC`. Without a token the bot runs in dry-run mode and logs what it would post at `/api/alerts/recent`.
 
 ## Optional env vars
 | Var | Unlocks |

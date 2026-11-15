@@ -115,7 +115,8 @@ async function refresh() {
     try { S.data[k] = await get(p); } catch (e) { console.warn('[flowstate]', k, e.message); S.data[k] ||= null; }
   }));
   S.updated = Date.now();
-  renderTicker(); render();
+  renderTicker();
+  if (!['login', 'onboarding', 'account', 'blog', 'post', 'privacy'].includes(route())) render();
 }
 
 // ------------------------------------------------------------ signals
@@ -495,13 +496,281 @@ function demoFlow(node) {
     notes: ['Demo mode: every value here is simulated.'], source: 'Demo' };
 }
 
-function route() { const h = location.hash.slice(1); return VIEWS[h] ? h : 'flowmap'; }
+
+// ------------------------------------------------------------ accounts, onboarding, newsletter, research
+const CFG = { accounts: false, newsletter: false, telegramUrl: '' };
+const AUTH = { sb: null, user: null, profile: null, ready: false };
+const MOUNTS = {};
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('on'), 3600); }
+
+async function postJSON(path, body, token) {
+  const r = await fetch(API + path, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`);
+  return j;
+}
+
+function loadScript(src) { return new Promise((ok, bad) => { const el = document.createElement('script'); el.src = src; el.onload = ok; el.onerror = () => bad(new Error('Could not load ' + src)); document.head.appendChild(el); }); }
+
+async function initAccounts() {
+  try { Object.assign(CFG, await (await fetch(API + '/api/config', { cache: 'no-store' })).json()); } catch {}
+  if (CFG.telegramUrl) { for (const id of ['tgBtn', 'footTgLink']) { const a = $('#' + id); a.href = CFG.telegramUrl; } $('#tgBtn').hidden = false; $('#footTg').hidden = false; }
+  if (!CFG.accounts) { AUTH.ready = true; updateAcctBtn(); return; }
+  try {
+    await loadScript('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2');
+    AUTH.sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, { auth: { flowType: 'pkce', detectSessionInUrl: true, persistSession: true } });
+    const { data } = await AUTH.sb.auth.getSession();
+    await setUser(data.session?.user || null);
+    AUTH.sb.auth.onAuthStateChange((ev, session) => { setUser(session?.user || null, ev); });
+    if (location.search.includes('code=')) history.replaceState(null, '', location.pathname + location.hash);
+  } catch (e) { console.warn('[flowstate] accounts', e.message); }
+  AUTH.ready = true; updateAcctBtn();
+}
+
+async function setUser(user, ev) {
+  const was = AUTH.user?.id;
+  AUTH.user = user;
+  if (!user) { AUTH.profile = null; updateAcctBtn(); if (['account', 'onboarding'].includes(route())) location.hash = 'login'; return; }
+  if (was === user.id && AUTH.profile) return;
+  const { data } = await AUTH.sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
+  AUTH.profile = data || null;
+  updateAcctBtn();
+  if (AUTH.profile?.persona) applyPersona(AUTH.profile);
+  if (!AUTH.profile?.onboarded_at) { if (route() !== 'onboarding') location.hash = 'onboarding'; else render(); }
+  else if (route() === 'login') { location.hash = 'flowmap'; if (ev === 'SIGNED_IN') toast('Signed in.'); }
+  else if (['account', 'onboarding'].includes(route())) render();
+}
+function updateAcctBtn() { const b = $('#acctBtn'); if (AUTH.user) { b.textContent = 'Account'; b.href = '#account'; } else { b.textContent = 'Log in'; b.href = '#login'; } }
+
+// Persona -> sensible default lens on Flow scope
+function applyPersona(p) {
+  const m = p.markets || [];
+  const lens = m.includes('stables') ? 'chains' : m.includes('defi') || m.includes('perps') ? 'platforms' : m.includes('alts') ? 'assets' : m.includes('macro') || m.includes('equities') ? 'regions' : null;
+  if (lens && !FM.trail.length && !applyPersona.done) { FM.lens = lens; if (!LENS_W[lens].includes(FM.w)) FM.w = 'd1'; applyPersona.done = true; }
+}
+
+// ---------------- newsletter capture (footer, blog, account)
+function newsletterHTML(source, compact = false) {
+  return `<form class="nl" data-source="${source}" novalidate>
+    ${compact ? '' : `<h3>Noise Floor newsletter</h3><p>One email a week: where money moved, what it means, and what to watch. No spam, unsubscribe anytime.</p>`}
+    <div class="nl-row"><label class="sr-only" for="nl-${source}">Email address</label>
+      <input id="nl-${source}" type="email" name="email" placeholder="you@domain.com" autocomplete="email" required>
+      <button type="submit" class="key go">Subscribe</button></div>
+    <p class="nl-msg" aria-live="polite"></p></form>`;
+}
+document.addEventListener('submit', async (e) => {
+  const f = e.target.closest('form.nl'); if (!f) return;
+  e.preventDefault();
+  const msg = f.querySelector('.nl-msg'), btn = f.querySelector('button');
+  const email = f.email.value.trim();
+  if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email)) { msg.textContent = 'Enter a valid email address.'; msg.className = 'nl-msg err'; return; }
+  btn.disabled = true; msg.textContent = 'Subscribing…'; msg.className = 'nl-msg';
+  try {
+    await postJSON('/api/subscribe', { email, source: f.dataset.source, persona: AUTH.profile?.persona || null, userId: AUTH.user?.id || null });
+    f.innerHTML = `<p class="nl-done">Subscribed. The next Noise Floor issue lands in ${esc(email)}.</p>`;
+  } catch (err) { msg.textContent = err.message; msg.className = 'nl-msg err'; btn.disabled = false; }
+});
+function mountNewsletterSlots() { document.querySelectorAll('.nl-slot:not(.on)').forEach((el) => { el.classList.add('on'); el.innerHTML = newsletterHTML(el.dataset.nl); }); }
+
+// ---------------- login
+VIEWS.login = function () {
+  if (AUTH.user) return `<div class="panel narrow"><h1>You're signed in</h1><p>Signed in as ${esc(AUTH.user.email)}.</p><a class="key go" href="#account">Open account</a></div>`;
+  if (AUTH.ready && !CFG.accounts) return `<div class="panel narrow"><h1>Accounts are almost ready</h1><p>Sign-in switches on as soon as the database is connected. Until then, everything on Flowstate is open, and you can still join the newsletter below.</p>${newsletterHTML('login')}</div>`;
+  return `<div class="panel narrow auth">
+    <div class="panel-bar"><span>Sign in</span><span class="led on"></span></div>
+    <h1>Sign in or create an account</h1>
+    <p>Enter your email and we'll send a one-time sign-in link. New here? The same link creates your account.</p>
+    <form id="loginForm" class="auth-form" novalidate>
+      <label for="loginEmail">Email</label>
+      <input id="loginEmail" type="email" autocomplete="email" required placeholder="you@domain.com">
+      <button class="key go" type="submit">Email me a sign-in link</button>
+      <p class="nl-msg" id="loginMsg" aria-live="polite"></p>
+    </form>
+    <ul class="perks"><li>Flow scope opens on the markets you follow</li><li>Noise Floor newsletter, weekly</li><li>Telegram alerts for big moves</li></ul>
+  </div>`;
+};
+document.addEventListener('submit', async (e) => {
+  if (e.target.id !== 'loginForm') return;
+  e.preventDefault();
+  const email = $('#loginEmail').value.trim(), msg = $('#loginMsg'), btn = e.target.querySelector('button');
+  if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email)) { msg.textContent = 'Enter a valid email address.'; msg.className = 'nl-msg err'; return; }
+  if (!AUTH.sb) { msg.textContent = 'Sign-in is still loading. Try again in a moment.'; msg.className = 'nl-msg err'; return; }
+  btn.disabled = true; msg.className = 'nl-msg'; msg.textContent = 'Sending…';
+  const { error } = await AUTH.sb.auth.signInWithOtp({ email, options: { emailRedirectTo: `${location.origin}/` } });
+  if (error) { msg.textContent = error.message; msg.className = 'nl-msg err'; btn.disabled = false; return; }
+  e.target.outerHTML = `<div class="sent"><div class="lcd"><div class="lcd-num small">LINK SENT</div><div class="lcd-lab">${esc(email)}</div></div>
+    <p>Open the email on this device and tap the link. It expires in an hour. Nothing there? Check spam, or <a href="#login" id="resend">send another</a>.</p></div>`;
+});
+document.addEventListener('click', (e) => { if (e.target.id === 'resend') { e.preventDefault(); render(); } });
+
+// ---------------- onboarding survey
+const SURVEY = [
+  { key: 'persona', q: 'What best describes you?', type: 'one', opts: [['trader', 'Active trader'], ['investor', 'Long-term investor'], ['fund', 'Fund or institution'], ['builder', 'Founder or builder'], ['analyst', 'Analyst or researcher'], ['creator', 'Creator or media'], ['exploring', 'Just exploring']] },
+  { key: 'markets', q: 'Which markets do you follow?', hint: 'Pick all that apply.', type: 'many', opts: [['majors', 'BTC and ETH'], ['alts', 'Altcoins and memecoins'], ['defi', 'DeFi'], ['stables', 'Stablecoins and payments'], ['perps', 'Perps and derivatives'], ['prediction', 'Prediction markets'], ['rwa', 'RWA and tokenized assets'], ['equities', 'US stocks and ETFs'], ['macro', 'Rates and macro']] },
+  { key: 'capital', q: 'Roughly how much capital do you trade or manage?', hint: 'Optional. Helps us build the right tools.', type: 'one', optional: true, opts: [['lt10k', 'Under $10K'], ['10k-100k', '$10K to $100K'], ['100k-1m', '$100K to $1M'], ['1m-10m', '$1M to $10M'], ['10m+', 'Over $10M'], ['na', 'Prefer not to say']] },
+  { key: 'goals', q: 'What do you want from Flowstate?', type: 'many', opts: [['rotation', 'Spot rotations early'], ['whales', 'Follow whales'], ['macro', 'Macro and liquidity context'], ['research', 'Research and content'], ['alerts', 'Alerts on my phone'], ['data', 'Data for my own models']],
+    extra: [{ key: 'region', label: 'Where are you based?', opts: [['india', 'India'], ['us', 'United States'], ['europe', 'Europe'], ['asia', 'Asia (other)'], ['mena', 'Middle East'], ['latam', 'Latin America'], ['africa', 'Africa'], ['other', 'Elsewhere']] },
+            { key: 'heard_from', label: 'How did you find us?', opts: [['x', 'X'], ['newsletter', 'Newsletter'], ['telegram', 'Telegram'], ['friend', 'A friend'], ['search', 'Search'], ['other', 'Other']] }] },
+  { key: 'finish', q: 'Stay in the loop', type: 'finish' },
+];
+const OB = { step: 0, a: {} };
+function obInit() { const p = AUTH.profile || {}; OB.a = { persona: p.persona, markets: p.markets || [], capital: p.capital, goals: p.goals || [], region: p.region, heard_from: p.heard_from, newsletter: p.newsletter ?? true, telegram: p.telegram || '' }; }
+
+VIEWS.onboarding = function () {
+  if (!AUTH.user) return `<div class="panel narrow"><h1>Sign in first</h1><p>The setup saves to your account.</p><a class="key go" href="#login">Sign in</a></div>`;
+  if (!OB.inited) { obInit(); OB.inited = true; }
+  const st = SURVEY[OB.step];
+  const chip = (key, v, l, many) => { const on = many ? (OB.a[key] || []).includes(v) : OB.a[key] === v; return `<button type="button" class="chip${on ? ' on' : ''}" role="${many ? 'checkbox' : 'radio'}" aria-checked="${on}" data-ob="${key}" data-v="${v}" data-many="${many ? 1 : 0}">${l}</button>`; };
+  let body = '';
+  if (st.type === 'finish') {
+    body = `<label class="toggle"><input type="checkbox" id="obNl" ${OB.a.newsletter ? 'checked' : ''}><span class="tg-track"><span class="tg-thumb"></span></span><span>Send me the Noise Floor newsletter at ${esc(AUTH.user.email)}</span></label>
+      <label class="field">Telegram username (optional)<input id="obTg" value="${esc(OB.a.telegram || '')}" placeholder="@yourhandle" maxlength="40"></label>
+      ${CFG.telegramUrl ? `<a class="key tg" href="${esc(CFG.telegramUrl)}" target="_blank" rel="noopener">Join the alert channel</a>` : ''}
+      <p class="fine">We use your answers to tailor Flowstate and plan new features. We never sell your data. <a href="#privacy">Privacy</a></p>`;
+  } else {
+    body = `<div class="chips" role="${st.type === 'many' ? 'group' : 'radiogroup'}" aria-label="${esc(st.q)}">${st.opts.map(([v, l]) => chip(st.key, v, l, st.type === 'many')).join('')}</div>
+      ${(st.extra || []).map((x) => `<div class="sub-q">${x.label}</div><div class="chips small" role="radiogroup" aria-label="${x.label}">${x.opts.map(([v, l]) => chip(x.key, v, l, false)).join('')}</div>`).join('')}`;
+  }
+  const ok = st.type === 'finish' || st.optional || (st.type === 'many' ? (OB.a[st.key] || []).length : OB.a[st.key]);
+  return `<div class="panel ob">
+    <div class="panel-bar"><span>Setup</span><span class="steps" aria-label="Step ${OB.step + 1} of ${SURVEY.length}">${SURVEY.map((_, i) => `<i class="${i < OB.step ? 'done' : i === OB.step ? 'now' : ''}"></i>`).join('')}</span></div>
+    <h1>${st.q}</h1>${st.hint ? `<p class="hint">${st.hint}</p>` : ''}
+    ${body}
+    <div class="ob-nav">${OB.step ? '<button type="button" class="key" data-obnav="-1">Back</button>' : '<span></span>'}
+      <button type="button" class="key go" data-obnav="1" ${ok ? '' : 'disabled'}>${st.type === 'finish' ? 'Finish setup' : 'Next'}</button></div>
+    <p class="nl-msg" id="obMsg" aria-live="polite"></p>
+  </div>`;
+};
+document.addEventListener('click', async (e) => {
+  const c = e.target.closest('[data-ob]');
+  if (c) {
+    const k = c.dataset.ob, v = c.dataset.v;
+    if (c.dataset.many === '1') { const arr = OB.a[k] || []; OB.a[k] = arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]; }
+    else OB.a[k] = OB.a[k] === v ? null : v;
+    const y = scrollY; render(); scrollTo(0, y); return;
+  }
+  const n = e.target.closest('[data-obnav]'); if (!n || n.disabled) return;
+  const dir = Number(n.dataset.obnav);
+  if (dir < 0) { OB.step = Math.max(0, OB.step - 1); return render(); }
+  if (OB.step < SURVEY.length - 1) { OB.step++; return render(); }
+  OB.a.newsletter = $('#obNl').checked; OB.a.telegram = $('#obTg').value.trim().replace(/^@?/, '@').replace(/^@$/, '');
+  n.disabled = true; $('#obMsg').textContent = 'Saving…';
+  const row = { id: AUTH.user.id, email: AUTH.user.email, ...OB.a, onboarded_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+  const { error } = await AUTH.sb.from('profiles').upsert(row);
+  if (error) { $('#obMsg').textContent = `Could not save: ${error.message}`; $('#obMsg').className = 'nl-msg err'; n.disabled = false; return; }
+  if (OB.a.newsletter) postJSON('/api/subscribe', { email: AUTH.user.email, source: 'onboarding', persona: OB.a.persona, userId: AUTH.user.id }).catch(() => {});
+  AUTH.profile = row; OB.inited = false; OB.step = 0; applyPersona.done = false; applyPersona(row);
+  location.hash = 'flowmap'; toast('Setup saved. Flow scope now opens on your markets.');
+});
+
+// ---------------- account
+const LABEL = Object.fromEntries(SURVEY.flatMap((s) => [...(s.opts || []), ...(s.extra || []).flatMap((x) => x.opts)]));
+VIEWS.account = function () {
+  if (!AUTH.user) return `<div class="panel narrow"><h1>Sign in to see your account</h1><a class="key go" href="#login">Sign in</a></div>`;
+  const p = AUTH.profile || {};
+  const row = (k, v) => `<div><dt>${k}</dt><dd>${v || '–'}</dd></div>`;
+  return `<div class="panel narrow">
+    <div class="panel-bar"><span>Account</span><span class="led on"></span></div>
+    <h1>${esc(AUTH.user.email)}</h1>
+    <dl class="ro-stats acct">${row('Profile', LABEL[p.persona])}${row('Markets', (p.markets || []).map((m) => LABEL[m]).join(', '))}${row('Goals', (p.goals || []).map((m) => LABEL[m]).join(', '))}${row('Based in', LABEL[p.region])}${row('Newsletter', p.newsletter ? 'Subscribed' : 'Not subscribed')}${row('Telegram', esc(p.telegram || ''))}</dl>
+    <div class="ob-nav"><button class="key" data-act="edit">Edit answers</button><button class="key" data-act="nl">${p.newsletter ? 'Unsubscribe from newsletter' : 'Subscribe to newsletter'}</button><button class="key stop" data-act="out">Sign out</button></div>
+    ${CFG.telegramUrl ? `<p><a class="key tg" href="${esc(CFG.telegramUrl)}" target="_blank" rel="noopener">Join the alert channel</a></p>` : ''}
+  </div>`;
+};
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  if (b.dataset.act === 'out') { await AUTH.sb.auth.signOut(); toast('Signed out.'); location.hash = 'flowmap'; }
+  if (b.dataset.act === 'edit') { OB.inited = false; OB.step = 0; location.hash = 'onboarding'; }
+  if (b.dataset.act === 'nl') {
+    const on = !AUTH.profile?.newsletter; b.disabled = true;
+    try {
+      const { data } = await AUTH.sb.auth.getSession();
+      await postJSON(on ? '/api/subscribe' : '/api/unsubscribe', { email: AUTH.user.email, source: 'account', persona: AUTH.profile?.persona, userId: AUTH.user.id }, data.session?.access_token);
+      await AUTH.sb.from('profiles').update({ newsletter: on, updated_at: new Date().toISOString() }).eq('id', AUTH.user.id);
+      AUTH.profile.newsletter = on; toast(on ? 'Subscribed to Noise Floor.' : 'Unsubscribed.'); render();
+    } catch (err) { toast(err.message); b.disabled = false; }
+  }
+});
+
+// ---------------- research (blog)
+VIEWS.blog = function () { return `<h1>Research</h1><p class="lede">Notes on where money is moving and how to read it.</p><div id="posts" class="posts"><p class="empty">Loading…</p></div><div class="panel narrow nl-panel">${newsletterHTML('blog')}</div>`; };
+MOUNTS.blog = async function () {
+  try {
+    const { posts } = await (await fetch(API + '/api/blog')).json();
+    $('#posts').innerHTML = posts.length ? posts.map((p) => `<a class="post-card" href="#post-${p.slug}"><span class="pdate">${esc(p.date)}</span><h2>${esc(p.title)}</h2><p>${esc(p.summary)}</p></a>`).join('') : '<p class="empty">No posts yet.</p>';
+  } catch { $('#posts').innerHTML = '<p class="empty">Research could not load. Refresh to try again.</p>'; }
+};
+VIEWS.post = function () { return `<article class="post" id="post"><p class="empty">Loading…</p></article><div class="panel narrow nl-panel">${newsletterHTML('post')}</div>`; };
+MOUNTS.post = async function () {
+  const slug = location.hash.slice(6);
+  try {
+    const r = await fetch(API + '/api/blog/' + encodeURIComponent(slug)); const p = await r.json();
+    if (!r.ok) throw new Error(p.error);
+    document.title = `${p.title} | Flowstate`;
+    $('#post').innerHTML = `<a class="back" href="#blog">Research</a><span class="pdate">${esc(p.date)}, ${esc(p.author)}</span><h1>${esc(p.title)}</h1><div class="prose">${p.html}</div>`;
+  } catch (e) { $('#post').innerHTML = `<p class="empty">${esc(e.message || 'Post not found')}. <a href="#blog">See all research</a></p>`; }
+};
+
+VIEWS.privacy = function () {
+  return `<article class="post"><h1>Privacy</h1><div class="prose">
+  <p>Flowstate collects only what it needs to run your account and send what you asked for.</p>
+  <h3>What we store</h3><ul><li>Your email address, to sign you in and, if you opt in, to send the Noise Floor newsletter.</li><li>Your setup answers (profile, markets, goals, region, how you found us), to tailor Flowstate and decide what to build next.</li><li>Your Telegram username, only if you give it.</li></ul>
+  <h3>What we don't do</h3><ul><li>We don't sell or rent your data.</li><li>We don't track you across other sites.</li></ul>
+  <h3>Your choices</h3><p>Unsubscribe from any newsletter email or from your account page. To delete your account and answers, email the address on the newsletter and we'll remove them within 7 days.</p>
+  <p>Accounts and data are hosted on Supabase. Market data comes from public sources and does not involve your personal data.</p></div></article>`;
+};
+
+// ---------------- command bar (Bloomberg-style GO)
+const CMD = { res: [], i: -1, t: 0 };
+function cmdRender() {
+  const ul = $('#cmdList'), inp = $('#cmdIn');
+  ul.hidden = !CMD.res.length; inp.setAttribute('aria-expanded', String(!ul.hidden));
+  ul.innerHTML = CMD.res.map((r, i) => `<li role="option" id="cmd-${i}" aria-selected="${i === CMD.i}" data-i="${i}"><span>${esc(r.label)}</span><em>${esc(r.kind || '')}</em></li>`).join('');
+  if (CMD.i >= 0) inp.setAttribute('aria-activedescendant', `cmd-${CMD.i}`); else inp.removeAttribute('aria-activedescendant');
+}
+function cmdGo(r) {
+  if (!r) return;
+  $('#cmdIn').value = ''; CMD.res = []; cmdRender(); $('#cmdIn').blur();
+  const id = r.id;
+  if (LENSES.some(([k]) => k === id)) { FM.lens = id; FM.trail = []; }
+  else if (id.startsWith('chain:')) { FM.lens = 'chains'; FM.trail = [{ id, title: r.label }]; }
+  else if (id === 'hl') { FM.lens = 'platforms'; FM.trail = [{ id, title: r.label }]; }
+  else if (id.startsWith('hl:')) { FM.lens = 'platforms'; FM.trail = [{ id: 'hl', title: 'Hyperliquid perps' }, { id, title: r.label }]; }
+  else { FM.lens = 'platforms'; FM.trail = [{ id, title: r.label }]; }
+  if (!LENS_W[FM.lens].includes(FM.w)) FM.w = LENS_W[FM.lens].includes('d7') ? 'd7' : 'd1';
+  if (route() === 'flowmap' && $('#fmsvg')) { syncControls(); loadFlow(); } else location.hash = 'flowmap';
+}
+$('#cmdIn').addEventListener('input', () => {
+  const q = $('#cmdIn').value.trim(); clearTimeout(CMD.t);
+  if (!q) { CMD.res = []; return cmdRender(); }
+  CMD.t = setTimeout(async () => {
+    try { const j = S.live ? await (await fetch(`${API}/api/search?q=${encodeURIComponent(q)}`)).json() : { results: LENSES.filter(([, l]) => l.toLowerCase().includes(q.toLowerCase())).map(([id, l]) => ({ id, label: l, kind: 'Lens' })) };
+      if ($('#cmdIn').value.trim() === q) { CMD.res = j.results || []; CMD.i = CMD.res.length ? 0 : -1; cmdRender(); } } catch {}
+  }, 160);
+});
+$('#cmdIn').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' && CMD.res.length) { e.preventDefault(); CMD.i = (CMD.i + 1) % CMD.res.length; cmdRender(); }
+  if (e.key === 'ArrowUp' && CMD.res.length) { e.preventDefault(); CMD.i = (CMD.i - 1 + CMD.res.length) % CMD.res.length; cmdRender(); }
+  if (e.key === 'Escape') { CMD.res = []; cmdRender(); }
+});
+$('#cmd').addEventListener('submit', (e) => { e.preventDefault(); cmdGo(CMD.res[Math.max(0, CMD.i)]); });
+$('#cmdList').addEventListener('mousedown', (e) => { const li = e.target.closest('[data-i]'); if (li) { e.preventDefault(); cmdGo(CMD.res[Number(li.dataset.i)]); } });
+$('#cmdIn').addEventListener('blur', () => setTimeout(() => { CMD.res = []; cmdRender(); }, 120));
+document.addEventListener('keydown', (e) => {
+  const typing = /input|textarea|select/i.test(document.activeElement?.tagName || '');
+  if (e.key === '/' && !typing) { e.preventDefault(); $('#cmdIn').focus(); }
+  if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey && /^[1-8]$/.test(e.key)) { const a = document.querySelectorAll('#tabs a')[Number(e.key) - 1]; if (a) location.hash = a.getAttribute('href').slice(1); }
+});
+
+function route() { const h = location.hash.slice(1); if (h.startsWith('post-')) return 'post'; return VIEWS[h] ? h : 'flowmap'; }
 function render() {
   const r = route();
-  document.querySelectorAll('#tabs a').forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + r));
+  const tabFor = r === 'post' ? 'blog' : r;
+  document.querySelectorAll('#tabs a').forEach((a) => { const on = a.getAttribute('href') === '#' + tabFor; a.classList.toggle('on', on); if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
   if (r === 'flowmap' && $('#fmsvg') && !render.force) { $('#updated').textContent = S.updated ? `updated ${ago(S.updated)}` : 'loading…'; loadFlow(); return; }
   $('#view').innerHTML = VIEWS[r]();
   if (r === 'flowmap') mountFlow();
+  MOUNTS[r]?.();
   paintTape();
   $('#updated').textContent = S.updated ? `updated ${ago(S.updated)}` : 'loading…';
 }
@@ -619,6 +888,8 @@ setInterval(() => { if (S.updated) $('#updated').textContent = `updated ${ago(S.
   } else {
     connectBinance();
   }
+  mountNewsletterSlots();
+  initAccounts();
   render();
   await refresh();
   if (S.live) setInterval(refresh, REFRESH_MS);

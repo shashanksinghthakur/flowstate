@@ -7,23 +7,33 @@
 <meta name="description" content="Track where money is moving: crypto sectors, chains, stablecoins, ETFs, treasuries and liquidity, live.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&family=Barlow+Condensed:wght@500;600&family=Doto:wght@700;900&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Barlow+Condensed:wght@500;600&family=Doto:wght@700;900&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <header>
   <div class="bar">
-    <div class="logo">FLOW<b>STATE</b></div>
-    <div class="status"><span id="dot" class="dot"></span><span id="mode" class="badge live">LIVE</span><span id="updated">connecting…</span></div>
+    <a class="logo" href="#flowmap" aria-label="Flowstate home">FLOWSTATE</a>
+    <form class="cmd" id="cmd" role="search" autocomplete="off">
+      <label for="cmdIn" class="sr-only">Go to a chain, platform or market</label>
+      <span class="cmd-prompt" aria-hidden="true">&gt;</span>
+      <input id="cmdIn" type="search" placeholder="Arbitrum, Aave, BTC perp…" aria-autocomplete="list" aria-controls="cmdList" aria-expanded="false">
+      <button type="submit" class="go">GO</button>
+      <ul id="cmdList" class="cmd-list" role="listbox" hidden></ul>
+    </form>
+    <div class="status"><span id="dot" class="dot"></span><span id="mode" class="badge live">LIVE</span><span id="updated" class="upd">connecting…</span></div>
+    <a id="tgBtn" class="hbtn tg" href="#" target="_blank" rel="noopener" hidden>Join alerts</a>
+    <a id="acctBtn" class="hbtn" href="#login">Log in</a>
   </div>
-  <nav class="tabs" id="tabs">
-    <a href="#flowmap">Flow scope</a>
-    <a href="#overview">Overview</a>
-    <a href="#crypto">Crypto sectors</a>
-    <a href="#chains">Chains</a>
-    <a href="#tradfi">ETFs &amp; TradFi</a>
-    <a href="#liquidity">Treasury &amp; liquidity</a>
-    <a href="#tape">Whale tape</a>
+  <nav class="tabs" id="tabs" aria-label="Sections">
+    <a href="#flowmap"><kbd>1</kbd>Flow scope</a>
+    <a href="#overview"><kbd>2</kbd>Overview</a>
+    <a href="#crypto"><kbd>3</kbd>Crypto</a>
+    <a href="#chains"><kbd>4</kbd>Chains</a>
+    <a href="#tradfi"><kbd>5</kbd>ETFs</a>
+    <a href="#liquidity"><kbd>6</kbd>Rates</a>
+    <a href="#tape"><kbd>7</kbd>Tape</a>
+    <a href="#blog"><kbd>8</kbd>Research</a>
   </nav>
   <div class="ticker" id="ticker"></div>
 </header>
@@ -32,11 +42,16 @@
   <div id="demoNote" class="demo-note hidden">Demo data. This preview can't reach market APIs, so every number here is simulated. Run the included server (<code>node server.js</code>) and the same page switches to live feeds automatically.</div>
   <section id="view"></section>
   <footer>
-    <p><b>Methodology.</b> Stablecoin Δ = change in circulating supply (net mint/burn), per chain from DefiLlama. Bridge flow = 7-day withdrawals minus deposits per chain. Crypto sector Δ = 24h market-cap change from CoinGecko categories (a valuation move, not net deposits). ETF flow = money-flow-volume proxy from daily OHLCV, not official creation/redemption data. Liquidity = Fed balance sheet − TGA − reverse repo.</p>
-    <p>Sources: DefiLlama, CoinGecko, Yahoo Finance, US Treasury FiscalData, NY Fed, FRED, Binance / Coinbase public trade streams. Not investment advice.</p>
+    <div class="foot-grid">
+      <div class="nl-slot" data-nl="footer"></div>
+      <div class="foot-tg" id="footTg" hidden><h3>Alerts on Telegram</h3><p>Big flow moves, whale trades, US demand signals and a daily digest, the moment they happen.</p><a class="hbtn tg" id="footTgLink" href="#" target="_blank" rel="noopener">Join the alert channel</a></div>
+    </div>
+    <p><b>Methodology.</b> Stablecoin change is net mint or burn of circulating supply, per chain, from DefiLlama. Platform flows are TVL changes and include price moves. Narrative flows are 24h market-cap changes from CoinGecko. ETF flow is a money-flow-volume proxy, not creation/redemption data. Liquidity is the Fed balance sheet minus Treasury cash minus reverse repo.</p>
+    <p>Sources: DefiLlama, CoinGecko, Hyperliquid, Binance, Coinbase, Alpaca, FRED, US Treasury, NY Fed. Not investment advice. <a href="#privacy">Privacy</a></p>
   </footer>
 </main>
 <div id="tip"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 <script src="app.js"></script>
 </body>
 </html>

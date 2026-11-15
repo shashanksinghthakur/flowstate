@@ -6,10 +6,10 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/parsers.test.js && node test/providers.test.js && node test/flow.test.js",
+    "test": "node test/parsers.test.js && node test/providers.test.js && node test/flow.test.js && node test/alerts.test.js",
     "dev": "node scripts/mock-server.js",
     "build:preview": "node scripts/build-preview.js"
   },
-  "engines": { "node": ">=18" },
+  "engines": { "node": ">=22" },
   "license": "MIT"
 }

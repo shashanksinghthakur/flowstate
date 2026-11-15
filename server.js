@@ -7,6 +7,8 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadPosts } from './lib/blog.js';
+import { createAlerts } from './lib/alerts.js';
 
 const ROOT = fileURLToPath(new URL('./public/', import.meta.url));
 const PORT = Number(process.env.PORT || 8787);
@@ -14,6 +16,12 @@ const FRED_KEY = process.env.FRED_API_KEY || '';
 const CG_KEY = process.env.COINGECKO_API_KEY || '';
 const ALPACA_ID = process.env.ALPACA_KEY_ID || '';
 const ALPACA_SECRET = process.env.ALPACA_SECRET || '';
+const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+const TG_CHANNEL_URL = process.env.TELEGRAM_CHANNEL_URL || '';
+const SITE_URL = (process.env.SITE_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
 const UA = 'Mozilla/5.0 (Flowstate; +https://github.com/) AppleWebKit/537.36 Chrome/124 Safari/537.36';
 
 // ---------------------------------------------------------------- utilities
@@ -612,24 +620,121 @@ async function flowRoute(url) {
   return cached(`flow:${id}:${w}:${n}`, 60_000, async () => ({ id, w, updated: Date.now(), ...(await flowNode(id, w, n)) }));
 }
 
+
+// ---------------------------------------------------------------- accounts, newsletter, search, blog
+async function readBody(req, limit = 10_000) {
+  let b = '';
+  for await (const c of req) { b += c; if (b.length > limit) throw Object.assign(new Error('Body too large'), { status: 413 }); }
+  try { return JSON.parse(b || '{}'); } catch { throw Object.assign(new Error('Invalid JSON'), { status: 400 }); }
+}
+const hits = new Map();
+function rateLimited(ip, key, max, windowMs) {
+  const k = `${key}:${ip}`, now = Date.now();
+  const arr = (hits.get(k) || []).filter((t) => now - t < windowMs);
+  arr.push(now); hits.set(k, arr);
+  return arr.length > max;
+}
+const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[a-z]{2,24}$/i;
+async function sb(path, { method = 'GET', body, prefer } = {}) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) throw Object.assign(new Error('Storage is not configured yet'), { status: 503 });
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method, headers: { apikey: SUPABASE_SERVICE_KEY, authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'content-type': 'application/json', ...(prefer ? { prefer } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) throw Object.assign(new Error(`storage ${r.status}: ${(await r.text()).slice(0, 160)}`), { status: 502 });
+  return r.status === 204 ? null : r.json().catch(() => null);
+}
+
+async function subscribe(req) {
+  const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
+  if (rateLimited(ip, 'sub', 5, 60_000)) throw Object.assign(new Error('Too many attempts. Try again in a minute.'), { status: 429 });
+  const { email, source = 'site', persona = null, userId = null } = await readBody(req);
+  const e = String(email || '').trim().toLowerCase();
+  if (!EMAIL_RE.test(e)) throw Object.assign(new Error('Enter a valid email address.'), { status: 400 });
+  await sb('subscribers?on_conflict=email', { method: 'POST', prefer: 'resolution=merge-duplicates,return=minimal',
+    body: { email: e, source: String(source).slice(0, 40), persona: persona ? String(persona).slice(0, 40) : null, user_id: userId || null, unsubscribed_at: null } });
+  return { ok: true };
+}
+
+async function verifyUser(req) {
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!token || !SUPABASE_URL) throw Object.assign(new Error('Sign in first.'), { status: 401 });
+  const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_ANON_KEY, authorization: `Bearer ${token}` } });
+  if (!r.ok) throw Object.assign(new Error('Your session expired. Sign in again.'), { status: 401 });
+  return r.json();
+}
+async function unsubscribe(req) {
+  const user = await verifyUser(req);
+  await sb(`subscribers?email=eq.${encodeURIComponent(user.email.toLowerCase())}`, { method: 'PATCH', prefer: 'return=minimal', body: { unsubscribed_at: new Date().toISOString() } });
+  return { ok: true };
+}
+
+async function exportSubscribers(url) {
+  if (!ADMIN_TOKEN || url.searchParams.get('token') !== ADMIN_TOKEN) throw Object.assign(new Error('Not allowed'), { status: 403 });
+  const rows = await sb('subscribers?select=email,source,persona,created_at,unsubscribed_at&order=created_at.asc');
+  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  return ['email,source,persona,created_at,unsubscribed_at', ...rows.map((r) => [r.email, r.source, r.persona, r.created_at, r.unsubscribed_at].map(q).join(','))].join('\n');
+}
+
+async function search(url) {
+  const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+  if (q.length < 1) return { results: [] };
+  const out = [];
+  const lenses = [['chains', 'All chains', 'Lens'], ['platforms', 'All platforms', 'Lens'], ['assets', 'Crypto narratives', 'Lens'], ['regions', 'Regions', 'Lens'], ['hl', 'Hyperliquid perps', 'Venue']];
+  for (const [id, label, kind] of lenses) if (label.toLowerCase().includes(q) || id.startsWith(q)) out.push({ id, label, kind });
+  const [chains, protos, hl] = await Promise.all([chainStablesAll().catch(() => []), protocolsRaw().catch(() => []), hlRaw().catch(() => [])]);
+  for (const c of chains.sort((a, b) => b.supply - a.supply)) if (c.chain.toLowerCase().includes(q)) out.push({ id: `chain:${c.chain}`, label: c.chain, kind: 'Chain' });
+  for (const p of [...protos].sort((a, b) => b.tvl - a.tvl)) if (p.name.toLowerCase().includes(q)) out.push({ id: `proto:${p.slug}`, label: p.name, kind: p.category });
+  for (const a of [...hl].sort((x, y) => y.vol - x.vol)) if (a.coin.toLowerCase().startsWith(q)) out.push({ id: `hl:${a.coin}`, label: `${a.coin} perp`, kind: 'Hyperliquid market' });
+  const rank = (r) => (r.label.toLowerCase().startsWith(q) ? 0 : 1);
+  return { results: out.sort((a, b) => rank(a) - rank(b)).slice(0, 8) };
+}
+
+const alerts = createAlerts({
+  token: process.env.TELEGRAM_BOT_TOKEN, chat: process.env.TELEGRAM_CHAT_ID, site: SITE_URL, fmt$,
+  whaleMin: process.env.ALERT_WHALE_MIN_USD, digestHour: process.env.ALERT_DIGEST_HOUR_UTC,
+  data: { chainStablesAll, protocolsRaw, coinbasePremium, sectors, pctDelta },
+});
+
+async function adminAlert(req, url) {
+  if (!ADMIN_TOKEN || url.searchParams.get('token') !== ADMIN_TOKEN) throw Object.assign(new Error('Not allowed'), { status: 403 });
+  const kind = url.searchParams.get('kind') || 'test';
+  if (kind === 'digest') await alerts.digest(true);
+  else await alerts.send('<b>Flowstate alerts are connected.</b>\nThis channel will post big flow moves, whale trades, US demand signals and a daily digest.', null, { force: true });
+  return { ok: true, enabled: alerts.enabled, log: alerts.log.slice(0, 5) };
+}
+
 // ---------------------------------------------------------------- http
 const ROUTES = {
   '/api/sectors': sectors, '/api/stablecoins': stablecoins, '/api/chain-stables': chainStables,
   '/api/chains': chains, '/api/tradfi': tradfi, '/api/macro': macro, '/api/liquidity': liquidity,
+  '/api/config': async () => ({ supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY, telegramUrl: TG_CHANNEL_URL, accounts: Boolean(SUPABASE_URL && SUPABASE_ANON_KEY), newsletter: Boolean(SUPABASE_URL && SUPABASE_SERVICE_KEY) }),
+  '/api/blog': async () => ({ posts: (await loadPosts()).map(({ html, ...p }) => p) }),
+  '/api/alerts/recent': async () => ({ enabled: alerts.enabled, log: alerts.log.slice(0, 10) }),
   '/api/health': async () => ({ ok: true, live: true, fred: Boolean(FRED_KEY), alpaca: Boolean(ALPACA_ID && ALPACA_SECRET), coingecko: Boolean(CG_KEY), t: Date.now() }),
 };
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.ico': 'image/x-icon' };
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
-  const route = url.pathname === '/api/flow' ? () => flowRoute(url) : ROUTES[url.pathname];
+  if (url.pathname === '/api/admin/subscribers.csv') {
+    try { const csv = await exportSubscribers(url); res.writeHead(200, { 'content-type': 'text/csv', 'content-disposition': 'attachment; filename="flowstate-subscribers.csv"', 'cache-control': 'no-store' }); return res.end(csv); }
+    catch (e) { res.writeHead(e.status || 500, { 'content-type': 'text/plain' }); return res.end(e.message); }
+  }
+  const post = url.pathname.match(/^\/api\/blog\/([\w-]+)$/);
+  const POSTS = { '/api/subscribe': () => subscribe(req), '/api/unsubscribe': () => unsubscribe(req), '/api/admin/alert': () => adminAlert(req, url) };
+  const route = url.pathname === '/api/flow' ? () => flowRoute(url)
+    : url.pathname === '/api/search' ? () => search(url)
+    : post ? async () => { const p = (await loadPosts()).find((x) => x.slug === post[1]); if (!p) throw Object.assign(new Error('Post not found'), { status: 404 }); return p; }
+    : req.method === 'POST' ? POSTS[url.pathname] : ROUTES[url.pathname];
   if (route) {
     try {
       const body = JSON.stringify(await route());
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'public, max-age=30', 'access-control-allow-origin': '*' });
+      const cacheable = req.method === 'GET' && !url.pathname.startsWith('/api/config');
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': cacheable ? 'public, max-age=30' : 'no-store', 'access-control-allow-origin': '*' });
       return res.end(body);
     } catch (e) {
-      res.writeHead(502, { 'content-type': 'application/json' });
+      res.writeHead(e.status || 502, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({ error: String(e.message || e) }));
     }
   }
@@ -644,5 +749,6 @@ const server = http.createServer(async (req, res) => {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   server.listen(PORT, () => console.log(`FLOWSTATE live on http://localhost:${PORT}`));
+  if (process.env.ALERTS !== 'off') alerts.start();
 }
-export { server, flowNode };
+export { server, flowNode, search, alerts };
