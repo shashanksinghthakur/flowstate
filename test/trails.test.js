@@ -64,3 +64,15 @@ assert.equal(notified.length, 1, 'Telegram hook fires once');
 await tr.poll();
 assert.equal(notified.length, 1, 'no repeat alert on the next poll');
 console.log('trails tests passed:', t.insight);
+
+// Repeated withdrawals by one wallet merge into one hop and size equals their total.
+const tr2 = createTrails({ fetchJSON, postJSON: async (u, b) => ({ jsonrpc: '2.0', id: b.id, result: b.method === 'eth_blockNumber' ? '0x1' : b.method === 'eth_getBlockByNumber' ? { timestamp: '0x1' } : [] }) });
+const base = { kind: 'aave_withdraw', chain: 'ethereum', wallet: '0xcc', token: 'WETH', block: 1 };
+for (let i = 0; i < 5; i++) tr2._add({ ...base, amount: 400, usd: 732_000, ts: Date.now() - (i + 1) * 60e3, tx: '0x' + i });
+await tr2._link();
+const m = tr2.snapshot().trails[0];
+assert.equal(m.steps.length, 1); assert.match(m.steps[0].detail, /2,000 WETH in 5 txs/);
+assert.equal(Math.round(m.size), 3_660_000); assert.match(m.insight, /pulled \$3\.66M out of Aave \(WETH\)/);
+// A cached Hyperliquid result must not break later polls.
+await tr.poll(); assert.equal(tr.snapshot().status.errors.length, 0);
+console.log('trails merge tests passed');
