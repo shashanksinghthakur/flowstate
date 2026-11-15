@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: flowstate
+    runtime: node
+    plan: free
+    buildCommand: "true"
+    startCommand: node server.js
+    envVars:
+      - key: FRED_API_KEY
+        sync: false
+      - key: COINGECKO_API_KEY
+        sync: false

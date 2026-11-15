@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flowstate — Live Capital Flows</title>
+<meta name="description" content="Track where money is moving: crypto sectors, chains, stablecoins, ETFs, treasuries and liquidity, live.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="logo">FLOW<b>STATE</b></div>
+    <div class="status"><span id="dot" class="dot"></span><span id="mode" class="badge live">LIVE</span><span id="updated">connecting…</span></div>
+  </div>
+  <nav class="tabs" id="tabs">
+    <a href="#overview">Overview</a>
+    <a href="#crypto">Crypto sectors</a>
+    <a href="#chains">Chains</a>
+    <a href="#tradfi">ETFs &amp; TradFi</a>
+    <a href="#liquidity">Treasury &amp; liquidity</a>
+    <a href="#tape">Whale tape</a>
+  </nav>
+  <div class="ticker" id="ticker"></div>
+</header>
+
+<main class="wrap">
+  <div id="demoNote" class="demo-note hidden">Demo data. This preview can't reach market APIs, so every number here is simulated. Run the included server (<code>node server.js</code>) and the same page switches to live feeds automatically.</div>
+  <section id="view"></section>
+  <footer>
+    <p><b>Methodology.</b> Stablecoin Δ = change in circulating supply (net mint/burn), per chain from DefiLlama. Bridge flow = 7-day withdrawals minus deposits per chain. Crypto sector Δ = 24h market-cap change from CoinGecko categories (a valuation move, not net deposits). ETF flow = money-flow-volume proxy from daily OHLCV, not official creation/redemption data. Liquidity = Fed balance sheet − TGA − reverse repo.</p>
+    <p>Sources: DefiLlama, CoinGecko, Yahoo Finance, US Treasury FiscalData, NY Fed, FRED, Binance / Coinbase public trade streams. Not investment advice.</p>
+  </footer>
+</main>
+<div id="tip"></div>
+<script src="app.js"></script>
+</body>
+</html>
