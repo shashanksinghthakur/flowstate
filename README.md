@@ -27,6 +27,16 @@ If the page can't reach `/api/health`, it falls back to **demo mode** and shows 
 - **Railway / Fly / any VPS:** `node server.js`. Railway and Fly can also build the included `Dockerfile`.
 - **Docker:** `docker build -t flowstate . && docker run -p 8787:8787 flowstate`
 
+## Money trails
+Follows large wallets hop by hop: an Aave V3 withdrawal (Ethereum or Arbitrum), then USDC sent from the same address to the Hyperliquid bridge, then that address's Hyperliquid trades and open positions (e.g. "pulled $1.8M of WETH from Aave, moved $1.8M onto Hyperliquid 60 min later, opened a $9M ETH short at 5x"). Also tracks withdrawals off Hyperliquid and large standalone Aave exits.
+- Data: public Arbitrum and Ethereum RPC nodes (no key), Hyperliquid info API, DefiLlama prices. Polls every 2 minutes and backfills 6 hours on start.
+- Trails of $1M+ that end in a new position post to the Telegram channel.
+- Optional: `ARBITRUM_RPC_URL` / `ETHEREUM_RPC_URL` (e.g. Alchemy) for higher limits, `TRAIL_MIN_USD` (default 250000).
+- API: `/api/trails`.
+
+## Login = newsletter signup
+Every email entered on the login page is added to the Noise Floor list (source `signup`, or `early-access` before accounts are switched on). Before Supabase is connected, emails queue in `data/pending-subscribers.jsonl` and flush to Supabase automatically once it is. Render's free disk is wiped on each deploy, so connect Supabase before you drive traffic.
+
 ## Accounts, newsletter and alerts setup
 
 ### Supabase (login, onboarding answers, newsletter list), about 10 minutes

@@ -9,6 +9,8 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPosts } from './lib/blog.js';
 import { createAlerts } from './lib/alerts.js';
+import { createTrails } from './lib/trails.js';
+import { appendFile, writeFile, mkdir } from 'node:fs/promises';
 
 const ROOT = fileURLToPath(new URL('./public/', import.meta.url));
 const PORT = Number(process.env.PORT || 8787);
@@ -645,15 +647,35 @@ async function sb(path, { method = 'GET', body, prefer } = {}) {
   return r.status === 204 ? null : r.json().catch(() => null);
 }
 
+// Emails captured before Supabase is connected are queued on disk and flushed once it is.
+// Render's free disk is wiped on redeploy, so connect Supabase before collecting at scale.
+const QUEUE = fileURLToPath(new URL('./data/pending-subscribers.jsonl', import.meta.url));
+const storageReady = () => Boolean(SUPABASE_URL && SUPABASE_SERVICE_KEY);
+async function saveSubscriber(row) {
+  if (storageReady()) return sb('subscribers?on_conflict=email', { method: 'POST', prefer: 'resolution=merge-duplicates,return=minimal', body: row });
+  await mkdir(fileURLToPath(new URL('./data/', import.meta.url)), { recursive: true });
+  await appendFile(QUEUE, JSON.stringify({ ...row, queued_at: new Date().toISOString() }) + '\n');
+  return { queued: true };
+}
+async function flushQueue() {
+  if (!storageReady()) return 0;
+  let txt = '';
+  try { txt = await readFile(QUEUE, 'utf8'); } catch { return 0; }
+  const rows = txt.split('\n').filter(Boolean).map((l) => { try { const { queued_at, ...r } = JSON.parse(l); return r; } catch { return null; } }).filter(Boolean);
+  for (const r of rows) await sb('subscribers?on_conflict=email', { method: 'POST', prefer: 'resolution=merge-duplicates,return=minimal', body: r });
+  await writeFile(QUEUE, '');
+  if (rows.length) console.log(`newsletter: flushed ${rows.length} queued emails to Supabase`);
+  return rows.length;
+}
+
 async function subscribe(req) {
   const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
   if (rateLimited(ip, 'sub', 5, 60_000)) throw Object.assign(new Error('Too many attempts. Try again in a minute.'), { status: 429 });
   const { email, source = 'site', persona = null, userId = null } = await readBody(req);
   const e = String(email || '').trim().toLowerCase();
   if (!EMAIL_RE.test(e)) throw Object.assign(new Error('Enter a valid email address.'), { status: 400 });
-  await sb('subscribers?on_conflict=email', { method: 'POST', prefer: 'resolution=merge-duplicates,return=minimal',
-    body: { email: e, source: String(source).slice(0, 40), persona: persona ? String(persona).slice(0, 40) : null, user_id: userId || null, unsubscribed_at: null } });
-  return { ok: true };
+  const r = await saveSubscriber({ email: e, source: String(source).slice(0, 40), persona: persona ? String(persona).slice(0, 40) : null, user_id: userId || null, unsubscribed_at: null });
+  return { ok: true, queued: Boolean(r?.queued) };
 }
 
 async function verifyUser(req) {
@@ -696,6 +718,15 @@ const alerts = createAlerts({
   data: { chainStablesAll, protocolsRaw, coinbasePremium, sectors, pctDelta },
 });
 
+const trails = createTrails({
+  fetchJSON: (u) => getJSON(u), postJSON: (u, b) => postJSON(u, b, 20000),
+  minEvent: Number(process.env.TRAIL_MIN_USD) || 250_000,
+  onTrail: (t) => {
+    if (t.size < (Number(process.env.ALERT_TRAIL_MIN_USD) || 1e6)) return;
+    alerts.send(`◆ <b>Money trail</b>\n${t.insight.replace(/[<>&]/g, '')}${SITE_URL ? `\n<a href="${SITE_URL}/#trails">Follow the trail</a>` : ''}`, `trail:${t.wallet}:${t.steps.length}`).catch(() => {});
+  },
+});
+
 async function adminAlert(req, url) {
   if (!ADMIN_TOKEN || url.searchParams.get('token') !== ADMIN_TOKEN) throw Object.assign(new Error('Not allowed'), { status: 403 });
   const kind = url.searchParams.get('kind') || 'test';
@@ -710,6 +741,7 @@ const ROUTES = {
   '/api/chains': chains, '/api/tradfi': tradfi, '/api/macro': macro, '/api/liquidity': liquidity,
   '/api/config': async () => ({ supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY, telegramUrl: TG_CHANNEL_URL, accounts: Boolean(SUPABASE_URL && SUPABASE_ANON_KEY), newsletter: Boolean(SUPABASE_URL && SUPABASE_SERVICE_KEY) }),
   '/api/blog': async () => ({ posts: (await loadPosts()).map(({ html, ...p }) => p) }),
+  '/api/trails': async () => trails.snapshot(),
   '/api/alerts/recent': async () => ({ enabled: alerts.enabled, log: alerts.log.slice(0, 10) }),
   '/api/health': async () => ({ ok: true, live: true, fred: Boolean(FRED_KEY), alpaca: Boolean(ALPACA_ID && ALPACA_SECRET), coingecko: Boolean(CG_KEY), t: Date.now() }),
 };
@@ -750,5 +782,8 @@ const server = http.createServer(async (req, res) => {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   server.listen(PORT, () => console.log(`FLOWSTATE live on http://localhost:${PORT}`));
   if (process.env.ALERTS !== 'off') alerts.start();
+  if (process.env.TRAILS !== 'off') trails.start();
+  flushQueue().catch((e) => console.warn('queue', e.message));
+  setInterval(() => flushQueue().catch(() => {}), 5 * 60e3);
 }
-export { server, flowNode, search, alerts };
+export { server, flowNode, search, alerts, trails, subscribe, flushQueue };

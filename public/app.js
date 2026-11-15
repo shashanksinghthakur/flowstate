@@ -116,7 +116,7 @@ async function refresh() {
   }));
   S.updated = Date.now();
   renderTicker();
-  if (!['login', 'onboarding', 'account', 'blog', 'post', 'privacy'].includes(route())) render();
+  if (!['login', 'onboarding', 'account', 'blog', 'post', 'privacy', 'trails'].includes(route())) render();
 }
 
 // ------------------------------------------------------------ signals
@@ -281,7 +281,7 @@ function knobHTML(li) {
 
 function switchHTML(name, opts, cur, enabled, label) {
   const i = Math.max(0, opts.findIndex(([k]) => String(k) === String(cur)));
-  return `<div class="switch" role="radiogroup" aria-label="${label}" style="--n:${opts.length}">${opts.map(([k, l]) => `<button role="radio" aria-checked="${String(k) === String(cur)}" data-${name}="${k}" ${enabled.includes(k) ? '' : 'disabled'}>${l}</button>`).join('')}<span class="thumb" style="--i:${i}"></span></div>`;
+  return `<div class="switch" role="radiogroup" aria-label="${label}" style="--n:${opts.length}${opts.some(([, l]) => String(l).length > 5) ? ';--bw:86px' : ''}">${opts.map(([k, l]) => `<button role="radio" aria-checked="${String(k) === String(cur)}" data-${name}="${k}" ${enabled.includes(k) ? '' : 'disabled'}>${l}</button>`).join('')}<span class="thumb" style="--i:${i}"></span></div>`;
 }
 
 function trailHTML() {
@@ -342,6 +342,7 @@ function readoutHTML(d) {
     ${r.gauge ? gaugeHTML(r.gauge, FM.ang) : ''}
     ${stats.length ? `<dl class="ro-stats">${stats.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}</dl>` : ''}
     <p class="ro-head">${esc(r.headline || '')}</p>
+    ${/^(hl|proto:hyperliquid-bridge|chain:Arbitrum|chain:Ethereum)$/.test(d.id || '') ? '<a class="key small" href="#trails">Follow the wallets behind this</a>' : ''}
     <p class="ro-src">${esc(d.source || '')}. Updated ${ago(d.updated || Date.now())}.</p>`;
 }
 
@@ -574,19 +575,20 @@ function mountNewsletterSlots() { document.querySelectorAll('.nl-slot:not(.on)')
 
 // ---------------- login
 VIEWS.login = function () {
-  if (AUTH.user) return `<div class="panel narrow"><h1>You're signed in</h1><p>Signed in as ${esc(AUTH.user.email)}.</p><a class="key go" href="#account">Open account</a></div>`;
-  if (AUTH.ready && !CFG.accounts) return `<div class="panel narrow"><h1>Accounts are almost ready</h1><p>Sign-in switches on as soon as the database is connected. Until then, everything on Flowstate is open, and you can still join the newsletter below.</p>${newsletterHTML('login')}</div>`;
-  return `<div class="panel narrow auth">
-    <div class="panel-bar"><span>Sign in</span><span class="led on"></span></div>
-    <h1>Sign in or create an account</h1>
-    <p>Enter your email and we'll send a one-time sign-in link. New here? The same link creates your account.</p>
+  if (AUTH.user) return `<div class="panel narrow">${screws}<div class="panel-bar"><span>Account</span><span class="led on"></span></div><h1>You're signed in</h1><p>Signed in as ${esc(AUTH.user.email)}.</p><a class="key go" href="#account">Open account</a></div>`;
+  const live = CFG.accounts;
+  return `<div class="panel narrow auth">${screws}
+    <div class="panel-bar"><span>${live ? 'Sign in' : 'Early access'}</span><span class="led ${live ? 'on' : 'demo'}"></span></div>
+    <h1>${live ? 'Sign in or create an account' : 'Get early access to Flowstate accounts'}</h1>
+    <p>${live ? 'Enter your email and we’ll send a one-time sign-in link. New here? The same link creates your account.' : 'Accounts are opening shortly. Leave your email and you’ll be first in, with the Noise Floor newsletter while you wait.'}</p>
     <form id="loginForm" class="auth-form" novalidate>
       <label for="loginEmail">Email</label>
       <input id="loginEmail" type="email" autocomplete="email" required placeholder="you@domain.com">
-      <button class="key go" type="submit">Email me a sign-in link</button>
+      <button class="key go" type="submit">${live ? 'Email me a sign-in link' : 'Get early access'}</button>
+      <p class="fine">You'll also get the Noise Floor newsletter: one email a week on where money moved. Unsubscribe anytime. <a href="#privacy">Privacy</a></p>
       <p class="nl-msg" id="loginMsg" aria-live="polite"></p>
     </form>
-    <ul class="perks"><li>Flow scope opens on the markets you follow</li><li>Noise Floor newsletter, weekly</li><li>Telegram alerts for big moves</li></ul>
+    <ul class="perks"><li>Flow scope opens on the markets you follow</li><li>Money trails on the wallets that matter</li><li>Telegram alerts for big moves</li></ul>
   </div>`;
 };
 document.addEventListener('submit', async (e) => {
@@ -594,12 +596,20 @@ document.addEventListener('submit', async (e) => {
   e.preventDefault();
   const email = $('#loginEmail').value.trim(), msg = $('#loginMsg'), btn = e.target.querySelector('button');
   if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email)) { msg.textContent = 'Enter a valid email address.'; msg.className = 'nl-msg err'; return; }
-  if (!AUTH.sb) { msg.textContent = 'Sign-in is still loading. Try again in a moment.'; msg.className = 'nl-msg err'; return; }
-  btn.disabled = true; msg.className = 'nl-msg'; msg.textContent = 'Sending…';
-  const { error } = await AUTH.sb.auth.signInWithOtp({ email, options: { emailRedirectTo: `${location.origin}/` } });
-  if (error) { msg.textContent = error.message; msg.className = 'nl-msg err'; btn.disabled = false; return; }
-  e.target.outerHTML = `<div class="sent"><div class="lcd"><div class="lcd-num small">LINK SENT</div><div class="lcd-lab">${esc(email)}</div></div>
-    <p>Open the email on this device and tap the link. It expires in an hour. Nothing there? Check spam, or <a href="#login" id="resend">send another</a>.</p></div>`;
+  btn.disabled = true; msg.className = 'nl-msg'; msg.textContent = 'Working…';
+  let listed = true;
+  try { await postJSON('/api/subscribe', { email, source: CFG.accounts ? 'signup' : 'early-access' }); }
+  catch (err) { listed = false; if (!CFG.accounts) { msg.textContent = err.message; msg.className = 'nl-msg err'; btn.disabled = false; return; } }
+  if (CFG.accounts) {
+    if (!AUTH.sb) { msg.textContent = 'Sign-in is still loading. Try again in a moment.'; msg.className = 'nl-msg err'; btn.disabled = false; return; }
+    const { error } = await AUTH.sb.auth.signInWithOtp({ email, options: { emailRedirectTo: `${location.origin}/` } });
+    if (error) { msg.textContent = error.message; msg.className = 'nl-msg err'; btn.disabled = false; return; }
+    e.target.outerHTML = `<div class="sent"><div class="lcd"><div class="lcd-num small">LINK SENT</div><div class="lcd-lab">${esc(email)}</div></div>
+      <p>Open the email on this device and tap the link. It expires in an hour. Nothing there? Check spam, or <a href="#login" id="resend">send another</a>.</p></div>`;
+  } else {
+    e.target.outerHTML = `<div class="sent"><div class="lcd"><div class="lcd-num small">YOU'RE IN</div><div class="lcd-lab">${esc(email)}</div></div>
+      <p>${listed ? 'You’re on the early-access list and subscribed to Noise Floor. We’ll email you the moment accounts open.' : ''}</p>${CFG.telegramUrl ? `<a class="key tg" href="${esc(CFG.telegramUrl)}" target="_blank" rel="noopener">Join the alert channel</a>` : ''}</div>`;
+  }
 });
 document.addEventListener('click', (e) => { if (e.target.id === 'resend') { e.preventDefault(); render(); } });
 
@@ -632,7 +642,7 @@ VIEWS.onboarding = function () {
       ${(st.extra || []).map((x) => `<div class="sub-q">${x.label}</div><div class="chips small" role="radiogroup" aria-label="${x.label}">${x.opts.map(([v, l]) => chip(x.key, v, l, false)).join('')}</div>`).join('')}`;
   }
   const ok = st.type === 'finish' || st.optional || (st.type === 'many' ? (OB.a[st.key] || []).length : OB.a[st.key]);
-  return `<div class="panel ob">
+  return `<div class="panel ob">${screws}
     <div class="panel-bar"><span>Setup</span><span class="steps" aria-label="Step ${OB.step + 1} of ${SURVEY.length}">${SURVEY.map((_, i) => `<i class="${i < OB.step ? 'done' : i === OB.step ? 'now' : ''}"></i>`).join('')}</span></div>
     <h1>${st.q}</h1>${st.hint ? `<p class="hint">${st.hint}</p>` : ''}
     ${body}
@@ -669,7 +679,7 @@ VIEWS.account = function () {
   if (!AUTH.user) return `<div class="panel narrow"><h1>Sign in to see your account</h1><a class="key go" href="#login">Sign in</a></div>`;
   const p = AUTH.profile || {};
   const row = (k, v) => `<div><dt>${k}</dt><dd>${v || '–'}</dd></div>`;
-  return `<div class="panel narrow">
+  return `<div class="panel narrow">${screws}
     <div class="panel-bar"><span>Account</span><span class="led on"></span></div>
     <h1>${esc(AUTH.user.email)}</h1>
     <dl class="ro-stats acct">${row('Profile', LABEL[p.persona])}${row('Markets', (p.markets || []).map((m) => LABEL[m]).join(', '))}${row('Goals', (p.goals || []).map((m) => LABEL[m]).join(', '))}${row('Based in', LABEL[p.region])}${row('Newsletter', p.newsletter ? 'Subscribed' : 'Not subscribed')}${row('Telegram', esc(p.telegram || ''))}</dl>
@@ -759,7 +769,85 @@ $('#cmdIn').addEventListener('blur', () => setTimeout(() => { CMD.res = []; cmdR
 document.addEventListener('keydown', (e) => {
   const typing = /input|textarea|select/i.test(document.activeElement?.tagName || '');
   if (e.key === '/' && !typing) { e.preventDefault(); $('#cmdIn').focus(); }
-  if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey && /^[1-8]$/.test(e.key)) { const a = document.querySelectorAll('#tabs a')[Number(e.key) - 1]; if (a) location.hash = a.getAttribute('href').slice(1); }
+  if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey && /^[1-9]$/.test(e.key)) { const a = document.querySelectorAll('#tabs a')[Number(e.key) - 1]; if (a) location.hash = a.getAttribute('href').slice(1); }
+});
+
+
+// ------------------------------------------------------------ Money trails
+const TR = { min: 250000, filter: 'all', data: null, t: 0 };
+const TR_TYPES = [['all', 'All'], ['aave_to_hl', 'Aave › HL'], ['into_hl', 'Into HL'], ['out_of_hl', 'Out of HL'], ['aave_exit', 'Aave exits']];
+const TR_TYPE_LABEL = { aave_to_hl: 'Aave to Hyperliquid', into_hl: 'Into Hyperliquid', out_of_hl: 'Out of Hyperliquid', aave_exit: 'Large Aave exit' };
+const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+const txUrl = (s) => (s.chain === 'ethereum' ? `https://etherscan.io/tx/${s.tx}` : `https://arbiscan.io/tx/${s.tx}`);
+const clockTime = (t) => new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const screws = '<span class="screw tl"></span><span class="screw tr"></span><span class="screw bl"></span><span class="screw br"></span>';
+
+VIEWS.trails = function () {
+  return `<h1 class="sr-only">Money trails</h1>
+  <section class="rack scope trails-rack">${screws}
+    <div class="scope-top"><div class="scope-name"><span class="led ${S.live ? 'on' : 'demo'}"></span>Money trails</div><span class="rack-sub">Large wallets followed from protocol, to venue, to position</span></div>
+    <div class="tr-body">
+      <div class="tr-left">
+        <div class="controls tr-controls">
+          <div class="ctl"><div id="trMin">${switchHTML('trmin', [[250000, '$250K'], [1e6, '$1M'], [5e6, '$5M']], TR.min, [250000, 1e6, 5e6], 'Minimum size')}</div><div class="engrave">Minimum size</div></div>
+          <div class="ctl"><div id="trF" class="wide">${switchHTML('trf', TR_TYPES, TR.filter, TR_TYPES.map(([k]) => k), 'Trail type')}</div><div class="engrave">Show</div></div>
+        </div>
+        <div id="trList" class="tr-list"><div class="screen tr-wait"><p>Loading trails…</p></div></div>
+      </div>
+      <aside class="readout" id="trRead"></aside>
+    </div>
+    <p class="scope-notes">Trails link events by wallet address: an Aave V3 withdrawal on Ethereum or Arbitrum, then USDC sent to the Hyperliquid bridge from the same address, then that address's Hyperliquid trades and open positions. A wallet that changes address between hops is not linked. Times are approximate to the minute. Not investment advice.</p>
+  </section>`;
+};
+
+function trailHTML(t) {
+  const steps = t.steps.map((s, i) => {
+    const gap = i ? s.ts - t.steps[i - 1].ts : 0;
+    const gapTxt = i ? `<span class="hop">${gap < 60e3 ? 'seconds' : gap < 5400e3 ? Math.round(gap / 60e3) + ' min' : (gap / 3600e3).toFixed(1).replace(/\.0$/, '') + ' h'} later</span>` : '';
+    const tone = s.kind === 'trade' ? (/short/i.test(s.label) ? 'out' : /long/i.test(s.label) ? 'in' : 'neutral') : s.kind === 'exit' ? 'out' : s.kind === 'bridge' ? 'in' : 'neutral';
+    return `<li class="step k-${s.kind} ${tone}">${gapTxt}<div class="node">
+      <span class="st-label">${esc(s.label)}</span><span class="st-usd">${money(s.usd)}</span><span class="st-detail">${esc(s.detail)}</span>
+      <span class="st-time">${clockTime(s.ts)}${s.tx ? ` <a href="${txUrl(s)}" target="_blank" rel="noopener">tx</a>` : ''}</span></div></li>`;
+  }).join('');
+  const pos = t.hl?.positions?.length ? `<div class="tr-pos"><span class="tr-pos-k">Open now</span>${t.hl.positions.map((p) => `<span class="pos ${p.side === 'short' ? 'dn' : 'up'}">${esc(p.coin)} ${p.side} ${money(p.value)}${p.leverage ? ` ${p.leverage}x` : ''}${p.entryPx ? `, entry ${px(p.entryPx)}` : ''}${p.liqPx ? `, liq ${px(p.liqPx)}` : ''}, PnL ${money(p.upnl, true)}</span>`).join('')}</div>` : '';
+  return `<article class="trail">
+    <div class="tr-head"><span class="tr-type">${TR_TYPE_LABEL[t.type] || 'Trail'}</span><span class="tr-size">${money(t.size)}</span>
+      <a class="tr-wallet" href="https://app.hyperliquid.xyz/explorer/address/${t.wallet}" target="_blank" rel="noopener" title="${t.wallet}">${short(t.wallet)}</a><span class="tr-when">${ago(t.last)}</span></div>
+    <p class="tr-insight">${esc(t.insight)}</p>
+    <ol class="chainline">${steps}</ol>${pos}
+  </article>`;
+}
+
+function trailsReadout(d) {
+  const sm = d.summary || {};
+  const lean = sm.short + sm.long ? (sm.tilt < -20 ? 'leaning short' : sm.tilt > 20 ? 'leaning long' : 'balanced') : null;
+  const top = (sm.coins || [])[0];
+  const fake = { kind: 'Last 24 hours', title: 'Tracked wallets', source: 'Arbitrum and Ethereum public nodes, Hyperliquid API', updated: d.updated || Date.now(),
+    readout: { net: sm.intoHl || 0, netLabel: 'Moved onto Hyperliquid', gauge: sm.short + sm.long ? { value: sm.tilt, min: -100, max: 100, label: 'New positions, short to long' } : null,
+      extra: [['From Aave into Hyperliquid', money(sm.fromAave || 0)], ['Taken off Hyperliquid', money(sm.outHl || 0)], ['Shorts opened', money(sm.short || 0)], ['Longs opened', money(sm.long || 0)],
+        ...(sm.coins || []).slice(0, 4).map((c) => [`${c.coin} opened`, [c.long ? `${money(c.long)} long` : '', c.short ? `${money(c.short)} short` : ''].filter(Boolean).join(', ')])],
+      headline: lean ? `Fresh margin is ${lean}${top ? `, with most size in ${top.coin}` : ''}.` : 'No new positions from tracked wallets yet.' } };
+  return readoutHTML(fake).replace(/<p class="ro-src">/, `<p class="ro-src">Blocks scanned: Arbitrum ${d.status?.blocks?.arbitrum || '–'}, Ethereum ${d.status?.blocks?.ethereum || '–'}. `);
+}
+
+function paintTrails() {
+  const d = TR.data; if (!d || !$('#trList')) return;
+  const list = (d.trails || []).filter((t) => t.size >= TR.min && (TR.filter === 'all' || t.type === TR.filter));
+  $('#trList').innerHTML = list.length ? list.map(trailHTML).join('')
+    : `<div class="screen tr-wait"><p>${d.status?.warmingUp ? 'Scanning the last 6 hours of Arbitrum and Ethereum. The first trails appear within a few minutes.' : 'No trails at this size and filter in the last 48 hours. Lower the minimum size or switch filter.'}</p>${d.status?.errors?.length ? `<p class="err">Last data error: ${esc(d.status.errors[0].msg)}</p>` : ''}</div>`;
+  const ro = $('#trRead'); ro.innerHTML = trailsReadout(d);
+  const nd = ro.querySelector('.needle'); if (nd) requestAnimationFrame(() => requestAnimationFrame(() => { nd.style.transform = `rotate(${nd.dataset.ang}deg)`; }));
+}
+async function loadTrails() {
+  if (!S.live) { TR.data = { status: { warmingUp: false }, summary: {}, trails: [] }; return paintTrails(); }
+  try { TR.data = await (await fetch(API + '/api/trails', { cache: 'no-store' })).json(); TR.t = Date.now(); paintTrails(); }
+  catch (e) { if ($('#trList')) $('#trList').innerHTML = `<div class="screen tr-wait"><p>Trails could not load: ${esc(e.message)}. Retrying shortly.</p></div>`; }
+}
+MOUNTS.trails = () => { if (TR.data) paintTrails(); loadTrails(); };
+setInterval(() => { if (route() === 'trails') loadTrails(); }, 60_000);
+document.addEventListener('click', (e) => {
+  const m = e.target.closest('[data-trmin]'); if (m) { TR.min = Number(m.dataset.trmin); $('#trMin').innerHTML = switchHTML('trmin', [[250000, '$250K'], [1e6, '$1M'], [5e6, '$5M']], TR.min, [250000, 1e6, 5e6], 'Minimum size'); return paintTrails(); }
+  const f = e.target.closest('[data-trf]'); if (f) { TR.filter = f.dataset.trf; $('#trF').innerHTML = switchHTML('trf', TR_TYPES, TR.filter, TR_TYPES.map(([k]) => k), 'Trail type'); return paintTrails(); }
 });
 
 function route() { const h = location.hash.slice(1); if (h.startsWith('post-')) return 'post'; return VIEWS[h] ? h : 'flowmap'; }
@@ -768,7 +856,8 @@ function render() {
   const tabFor = r === 'post' ? 'blog' : r;
   document.querySelectorAll('#tabs a').forEach((a) => { const on = a.getAttribute('href') === '#' + tabFor; a.classList.toggle('on', on); if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
   if (r === 'flowmap' && $('#fmsvg') && !render.force) { $('#updated').textContent = S.updated ? `updated ${ago(S.updated)}` : 'loading…'; loadFlow(); return; }
-  $('#view').innerHTML = VIEWS[r]();
+  const html = VIEWS[r]();
+  $('#view').innerHTML = ['flowmap', 'trails', 'login', 'onboarding', 'account'].includes(r) ? html : `<section class="rack page-rack">${screws}${html}</section>`;
   if (r === 'flowmap') mountFlow();
   MOUNTS[r]?.();
   paintTape();
