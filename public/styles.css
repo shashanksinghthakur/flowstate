@@ -482,3 +482,4 @@ footer a { color: var(--amber); }
   .switch[style*="--bw:86px"] button { font-size: 12.5px; }
   .tr-controls { gap: 12px; justify-content: center; }
 }
+.tr-list > .trail { display: block; font: inherit; }
