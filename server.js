@@ -443,12 +443,12 @@ async function flowNode(id, w, n) {
     const left = rows.filter((r) => r[w] < 0).map((r) => ({ id: `chain:${r.chain}`, label: r.chain, value: -r[w], method: 'measured', tone: 'out' }));
     const right = rows.filter((r) => r[w] > 0).map((r) => ({ id: `chain:${r.chain}`, label: r.chain, value: r[w], method: 'measured', tone: 'in' }));
     (total >= 0 ? left : right).push({ label: total >= 0 ? 'Issuers (net mint)' : 'Issuers (net redeem)', value: Math.abs(total), method: 'measured', tone: total >= 0 ? 'in' : 'out' });
-    const top = [...right].sort((a, b) => b.value - a.value)[0];
+    const top = [...right].filter((x) => x.id).sort((a, b) => b.value - a.value)[0];
     return {
       title: 'All chains', kind: 'Stablecoin dollars', leftLabel: `Chains losing dollars, ${W}`, rightLabel: `Chains gaining dollars, ${W}`,
       left: side(left, n), right: side(right, n),
       readout: { net: total, netLabel: `Net new stablecoins, ${W}`, base: supply, baseLabel: 'Stablecoins outstanding', gauge: { value: (total / supply) * 100, min: -2, max: 2, label: 'Supply change' },
-        headline: `${fmt$(Math.abs(total))} of stablecoins were ${total >= 0 ? 'minted into' : 'redeemed out of'} crypto over ${W}.${top ? ` ${top.label} took in the most: ${fmt$(top.value)}.` : ''}` },
+        headline: `${fmt$(Math.abs(total))} of stablecoins were ${total >= 0 ? 'minted into' : 'redeemed out of'} crypto over ${W}.${top ? ` ${top.label} still took in the most: ${fmt$(top.value)}.` : ''}`.replace(' still', total >= 0 ? '' : ' still') },
       notes: ['Bands show each chain’s net change in USD stablecoins. Individual transfers between chains are not observed yet.'],
       source: 'DefiLlama stablecoins',
     };
@@ -490,11 +490,11 @@ async function flowNode(id, w, n) {
     const net = per.reduce((t, x) => t + x.d, 0);
     const notes = ['Bands are TVL changes per chain and include price moves.'];
     if (slug === 'hyperliquid-bridge') {
-      // USDC parked in the bridge on Arbitrum is trading margin on Hyperliquid, so TVL change = net deposits.
-      const arb = per.find((x) => x.chain === 'Arbitrum')?.d ?? net;
-      left = [{ id: 'chain:Arbitrum', label: arb >= 0 ? 'Arbitrum deposits' : 'Hyperliquid withdrawals', value: Math.abs(arb), method: 'measured', tone: arb >= 0 ? 'in' : 'out' }];
-      right = [{ id: 'hl', label: arb >= 0 ? 'Hyperliquid perps margin' : 'Back to Arbitrum', value: Math.abs(arb), method: 'measured', tone: arb >= 0 ? 'in' : 'out' }];
-      notes.splice(0, 1, 'The bridge holds USDC on Arbitrum, so its balance change is net deposits to Hyperliquid.');
+      // Assets parked in the bridge are trading margin on Hyperliquid, so their change is net deposits.
+      // Arbitrum holds USDC (measured); other routes can hold volatile assets (estimated).
+      left = per.map((x) => ({ id: x.chain === 'Arbitrum' ? 'chain:Arbitrum' : null, label: `${x.chain} ${x.d >= 0 ? 'deposits' : 'withdrawals'}`, value: Math.abs(x.d), method: x.chain === 'Arbitrum' ? 'measured' : 'estimated', tone: x.d >= 0 ? 'in' : 'out' }));
+      right = [{ id: 'hl', label: net >= 0 ? 'Hyperliquid perps margin' : 'Net withdrawn from Hyperliquid', value: Math.abs(net), method: per.length === 1 ? 'measured' : 'estimated', tone: net >= 0 ? 'in' : 'out' }];
+      notes.splice(0, 1, 'The bridge balance is trading margin on Hyperliquid, so its change is net deposits. The Arbitrum side is USDC; other routes can include volatile assets.');
     }
     return {
       title: p.name, kind: p.category, leftLabel: `Deposits from, ${W}`, rightLabel: `Withdrawn to, ${W}`,
@@ -508,17 +508,17 @@ async function flowNode(id, w, n) {
   if (id === 'hl') {
     const [assets, protos] = await Promise.all([hlRaw(), protocolsRaw()]);
     const br = protos.find((x) => x.slug === 'hyperliquid-bridge');
-    const dep = br ? pctDelta(br.chains.Arbitrum || br.tvl, protoPct(br, w)) || 0 : 0;
+    const dep = br ? Object.values(br.chains).reduce((t, v) => t + (pctDelta(v, protoPct(br, w)) || 0), 0) : 0;
     const vol = assets.reduce((t, a) => t + a.vol, 0), oi = assets.reduce((t, a) => t + a.oi, 0);
     const right = assets.map((a) => ({ id: `hl:${a.coin}`, label: a.coin, value: a.vol, method: 'measured', tone: a.prevPx && a.px >= a.prevPx ? 'in' : 'out', sub: `OI ${fmt$(a.oi)}` }));
     const top = [...assets].sort((a, b) => b.vol - a.vol).slice(0, 3).map((a) => a.coin).join(', ');
     return {
       title: 'Hyperliquid perps', kind: 'Venue', leftLabel: `Net bridge deposits, ${w === 'd1' ? '24h' : '7d'}`, rightLabel: 'Traded into, 24h volume',
-      left: [{ id: 'proto:hyperliquid-bridge', label: dep >= 0 ? 'Arbitrum bridge in' : 'Arbitrum bridge out', value: Math.abs(dep), method: 'measured', tone: dep >= 0 ? 'in' : 'out' }],
+      left: [{ id: 'proto:hyperliquid-bridge', label: dep >= 0 ? 'Bridge deposits' : 'Bridge withdrawals', value: Math.abs(dep), method: 'estimated', tone: dep >= 0 ? 'in' : 'out' }],
       right: side(right, n),
       readout: { net: dep, netLabel: 'Net deposits', base: oi, baseLabel: 'Open interest', gauge: { value: oi ? (dep / oi) * 100 : 0, min: -5, max: 5, label: 'Deposits vs OI' },
         extra: [['24h volume', fmt$(vol)], ['Markets', String(assets.length)]],
-        headline: `Margin ${dep >= 0 ? 'arrived' : 'left'} via the Arbitrum bridge (${fmt$(Math.abs(dep))}). Most trading went to ${top}.` },
+        headline: `${fmt$(Math.abs(dep))} of margin ${dep >= 0 ? 'arrived through' : 'left through'} the bridge. Most trading went to ${top}.` },
       notes: ['Deposits and volume are different measures, so each side is scaled on its own.'],
       source: 'Hyperliquid info API + DefiLlama',
     };
@@ -570,7 +570,7 @@ async function flowNode(id, w, n) {
       title: 'Crypto narratives', kind: 'Sectors', leftLabel: 'Value leaving, 24h', rightLabel: 'Value arriving, 24h',
       left: side(left, n), right: side(right, n),
       readout: { net, netLabel: 'Net market-cap change, 24h', base: null, gauge: null,
-        headline: `Leading: ${right.sort((a, b) => b.value - a.value)[0]?.label || 'none'}. Lagging: ${left.sort((a, b) => b.value - a.value)[0]?.label || 'none'}.` },
+        headline: !right.length ? `Every narrative lost value over 24h. Hardest hit: ${left.sort((a, b) => b.value - a.value)[0]?.label}.` : !left.length ? `Every narrative gained over 24h. Biggest: ${right.sort((a, b) => b.value - a.value)[0]?.label}.` : `Leading: ${right.sort((a, b) => b.value - a.value)[0].label}. Lagging: ${left.sort((a, b) => b.value - a.value)[0].label}.` },
       notes: ['Market-cap change measures valuation, not deposits. Sectors overlap (a coin can be both AI and Layer 1).'], source: 'CoinGecko categories',
     };
   }
