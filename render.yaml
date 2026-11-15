@@ -8,6 +8,8 @@ services:
     envVars:
       - key: ADMIN_TOKEN
         generateValue: true
+      - key: AUTH_PROVIDERS
+        value: google,apple,twitter
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_ANON_KEY

@@ -740,7 +740,7 @@ async function adminAlert(req, url) {
 const ROUTES = {
   '/api/sectors': sectors, '/api/stablecoins': stablecoins, '/api/chain-stables': chainStables,
   '/api/chains': chains, '/api/tradfi': tradfi, '/api/macro': macro, '/api/liquidity': liquidity,
-  '/api/config': async () => ({ supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY, telegramUrl: TG_CHANNEL_URL, accounts: Boolean(SUPABASE_URL && SUPABASE_ANON_KEY), newsletter: Boolean(SUPABASE_URL && SUPABASE_SERVICE_KEY) }),
+  '/api/config': async () => ({ supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY, providers: (process.env.AUTH_PROVIDERS ?? 'google,apple,twitter').split(',').map((x) => x.trim()).filter(Boolean), otpLength: Number(process.env.AUTH_OTP_LENGTH) || 6, telegramUrl: TG_CHANNEL_URL, accounts: Boolean(SUPABASE_URL && SUPABASE_ANON_KEY), newsletter: Boolean(SUPABASE_URL && SUPABASE_SERVICE_KEY) }),
   '/api/blog': async () => ({ posts: (await loadPosts()).map(({ html, ...p }) => p) }),
   '/api/trails': async () => trails.snapshot(),
   '/api/alerts/recent': async () => ({ enabled: alerts.enabled, log: alerts.log.slice(0, 10) }),

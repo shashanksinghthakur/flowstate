@@ -43,8 +43,14 @@ Every email entered on the login page is added to the Noise Floor list (source `
 1. Create a free project at supabase.com.
 2. SQL Editor → New query → paste `supabase/schema.sql` → Run.
 3. Authentication → URL Configuration: set **Site URL** to your Render URL and add the same URL under **Redirect URLs**.
-4. Project Settings → API: copy the Project URL, the `anon` key and the `service_role` key into Render as `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
-5. Supabase's built-in email sender is rate-limited and meant for testing. Before launch, add a custom SMTP sender under Authentication → SMTP Settings (for example Resend).
+4. Authentication → Providers → Email: keep **Confirm email** on. Then Authentication → Email Templates: in **Confirm signup**, **Magic Link** and **Reset Password**, include `{{ .Token }}` so users get a 6-digit code (Flowstate asks for the code, not a link).
+5. Social logins (optional, each under Authentication → Providers). The callback URL to paste into each provider is `https://<project>.supabase.co/auth/v1/callback`.
+   - **Google:** create an OAuth client in Google Cloud Console (free).
+   - **Apple:** needs an Apple Developer account ($99/year), a Services ID and a key.
+   - **X:** create an app in the X developer portal (free tier) and enable OAuth 2.0.
+   Set `AUTH_PROVIDERS` in Render to the ones you enabled, e.g. `google,twitter`. Default shows `google,apple,twitter`.
+6. Project Settings → API: copy the Project URL, the `anon` key and the `service_role` key into Render as `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
+7. Supabase's built-in email sender is rate-limited and meant for testing. Before launch, add a custom SMTP sender under Authentication → SMTP Settings (for example Resend).
 
 Export the newsletter list any time: `https://<your-site>/api/admin/subscribers.csv?token=<ADMIN_TOKEN>` (Render generates `ADMIN_TOKEN`; find it under Environment).
 

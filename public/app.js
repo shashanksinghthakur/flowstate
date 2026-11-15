@@ -116,7 +116,7 @@ async function refresh() {
   }));
   S.updated = Date.now();
   renderTicker();
-  if (!['login', 'onboarding', 'account', 'blog', 'post', 'privacy', 'trails'].includes(route())) render();
+  if (!['login', 'signup', 'onboarding', 'account', 'blog', 'post', 'privacy', 'trails'].includes(route())) render();
 }
 
 // ------------------------------------------------------------ signals
@@ -516,7 +516,7 @@ function loadScript(src) { return new Promise((ok, bad) => { const el = document
 async function initAccounts() {
   try { Object.assign(CFG, await (await fetch(API + '/api/config', { cache: 'no-store' })).json()); } catch {}
   if (CFG.telegramUrl) { for (const id of ['tgBtn', 'footTgLink']) { const a = $('#' + id); a.href = CFG.telegramUrl; } $('#tgBtn').hidden = false; $('#footTg').hidden = false; }
-  if (!CFG.accounts) { AUTH.ready = true; updateAcctBtn(); return; }
+  if (!CFG.accounts) { AUTH.ready = true; updateAcctBtn(); if (['login', 'signup'].includes(route())) render(); return; }
   try {
     await loadScript('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2');
     AUTH.sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, { auth: { flowType: 'pkce', detectSessionInUrl: true, persistSession: true } });
@@ -526,6 +526,7 @@ async function initAccounts() {
     if (location.search.includes('code=')) history.replaceState(null, '', location.pathname + location.hash);
   } catch (e) { console.warn('[flowstate] accounts', e.message); }
   AUTH.ready = true; updateAcctBtn();
+  if (['login', 'signup'].includes(route()) && !document.querySelector('.auth-card input:focus')) render();
 }
 
 async function setUser(user, ev) {
@@ -536,12 +537,15 @@ async function setUser(user, ev) {
   const { data } = await AUTH.sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
   AUTH.profile = data || null;
   updateAcctBtn();
+  if (!AUTH.profile && user.email) addToList(user.email, user.app_metadata?.provider && user.app_metadata.provider !== 'email' ? `signup-${user.app_metadata.provider}` : 'signup');
+  if (AF.recovering) return;
+  AF.step = 'start'; AF.busy = false;
   if (AUTH.profile?.persona) applyPersona(AUTH.profile);
-  if (!AUTH.profile?.onboarded_at) { if (route() !== 'onboarding') location.hash = 'onboarding'; else render(); }
-  else if (route() === 'login') { location.hash = 'flowmap'; if (ev === 'SIGNED_IN') toast('Signed in.'); }
+  if (!AUTH.profile?.onboarded_at) { OB.inited = false; OB.done = false; if (route() !== 'onboarding') location.hash = 'onboarding'; else render(); }
+  else if (['login', 'signup'].includes(route())) { location.hash = 'flowmap'; if (ev === 'SIGNED_IN') toast('Logged in.'); }
   else if (['account', 'onboarding'].includes(route())) render();
 }
-function updateAcctBtn() { const b = $('#acctBtn'); if (AUTH.user) { b.textContent = 'Account'; b.href = '#account'; } else { b.textContent = 'Log in'; b.href = '#login'; } }
+function updateAcctBtn() { const b = $('#acctBtn'), su = $('#signupBtn'); if (AUTH.user) { b.textContent = 'Account'; b.href = '#account'; su.hidden = true; } else { b.textContent = 'Log in'; b.href = '#login'; su.hidden = false; } }
 
 // Persona -> sensible default lens on Flow scope
 function applyPersona(p) {
@@ -573,108 +577,317 @@ document.addEventListener('submit', async (e) => {
 });
 function mountNewsletterSlots() { document.querySelectorAll('.nl-slot:not(.on)').forEach((el) => { el.classList.add('on'); el.innerHTML = newsletterHTML(el.dataset.nl); }); }
 
-// ---------------- login
-VIEWS.login = function () {
-  if (AUTH.user) return `<div class="panel narrow">${screws}<div class="panel-bar"><span>Account</span><span class="led on"></span></div><h1>You're signed in</h1><p>Signed in as ${esc(AUTH.user.email)}.</p><a class="key go" href="#account">Open account</a></div>`;
-  const live = CFG.accounts;
-  return `<div class="panel narrow auth">${screws}
-    <div class="panel-bar"><span>${live ? 'Sign in' : 'Early access'}</span><span class="led ${live ? 'on' : 'demo'}"></span></div>
-    <h1>${live ? 'Sign in or create an account' : 'Get early access to Flowstate accounts'}</h1>
-    <p>${live ? 'Enter your email and we’ll send a one-time sign-in link. New here? The same link creates your account.' : 'Accounts are opening shortly. Leave your email and you’ll be first in, with the Noise Floor newsletter while you wait.'}</p>
-    <form id="loginForm" class="auth-form" novalidate>
-      <label for="loginEmail">Email</label>
-      <input id="loginEmail" type="email" autocomplete="email" required placeholder="you@domain.com">
-      <button class="key go" type="submit">${live ? 'Email me a sign-in link' : 'Get early access'}</button>
-      <p class="fine">You'll also get the Noise Floor newsletter: one email a week on where money moved. Unsubscribe anytime. <a href="#privacy">Privacy</a></p>
-      <p class="nl-msg" id="loginMsg" aria-live="polite"></p>
-    </form>
-    <ul class="perks"><li>Flow scope opens on the markets you follow</li><li>Money trails on the wallets that matter</li><li>Telegram alerts for big moves</li></ul>
-  </div>`;
+// ---------------- authentication (sign up / log in)
+const PROVIDERS = {
+  google: { name: 'Google', icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.4h6.5a5.6 5.6 0 0 1-2.4 3.6v3h3.9c2.3-2.1 3.5-5.2 3.5-8.7z"/><path fill="#34A853" d="M12 24c3.2 0 6-1.1 7.9-2.9l-3.9-3c-1.1.7-2.4 1.2-4 1.2-3.1 0-5.7-2.1-6.6-4.9H1.4v3.1A12 12 0 0 0 12 24z"/><path fill="#FBBC05" d="M5.4 14.4a7.2 7.2 0 0 1 0-4.7V6.6H1.4a12 12 0 0 0 0 10.9l4-3.1z"/><path fill="#EA4335" d="M12 4.8c1.7 0 3.3.6 4.6 1.8l3.4-3.4A12 12 0 0 0 1.4 6.6l4 3.1C6.3 6.9 8.9 4.8 12 4.8z"/></svg>' },
+  apple: { name: 'Apple', icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M16.4 12.7c0-2.6 2.1-3.8 2.2-3.9-1.2-1.8-3.1-2-3.8-2-1.6-.2-3.1.9-3.9.9-.8 0-2-.9-3.4-.9-1.7 0-3.3 1-4.2 2.6-1.8 3.1-.5 7.7 1.3 10.2.9 1.2 1.9 2.6 3.2 2.6 1.3-.1 1.8-.8 3.3-.8 1.6 0 2 .8 3.4.8 1.4 0 2.3-1.3 3.1-2.5 1-1.4 1.4-2.8 1.4-2.9-.1 0-2.6-1-2.6-4.1zM13.9 5.1c.7-.8 1.2-2 1-3.1-1 0-2.2.7-2.9 1.5-.6.7-1.2 1.9-1 3 1.1.1 2.2-.6 2.9-1.4z"/></svg>' },
+  twitter: { name: 'X', icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M17.8 2.5h3.2l-7 8 8.2 11h-6.4l-5-6.6-5.8 6.6H1.8l7.5-8.6L1.4 2.5h6.6l4.5 6 5.3-6zm-1.1 17.1h1.8L7.4 4.3H5.5l11.2 15.3z"/></svg>' },
+  github: { name: 'GitHub', icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 .5a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .5z"/></svg>' },
 };
-document.addEventListener('submit', async (e) => {
-  if (e.target.id !== 'loginForm') return;
-  e.preventDefault();
-  const email = $('#loginEmail').value.trim(), msg = $('#loginMsg'), btn = e.target.querySelector('button');
-  if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email)) { msg.textContent = 'Enter a valid email address.'; msg.className = 'nl-msg err'; return; }
-  btn.disabled = true; msg.className = 'nl-msg'; msg.textContent = 'Working…';
-  let listed = true;
-  try { await postJSON('/api/subscribe', { email, source: CFG.accounts ? 'signup' : 'early-access' }); }
-  catch (err) { listed = false; if (!CFG.accounts) { msg.textContent = err.message; msg.className = 'nl-msg err'; btn.disabled = false; return; } }
-  if (CFG.accounts) {
-    if (!AUTH.sb) { msg.textContent = 'Sign-in is still loading. Try again in a moment.'; msg.className = 'nl-msg err'; btn.disabled = false; return; }
-    const { error } = await AUTH.sb.auth.signInWithOtp({ email, options: { emailRedirectTo: `${location.origin}/` } });
-    if (error) { msg.textContent = error.message; msg.className = 'nl-msg err'; btn.disabled = false; return; }
-    e.target.outerHTML = `<div class="sent"><div class="lcd"><div class="lcd-num small">LINK SENT</div><div class="lcd-lab">${esc(email)}</div></div>
-      <p>Open the email on this device and tap the link. It expires in an hour. Nothing there? Check spam, or <a href="#login" id="resend">send another</a>.</p></div>`;
-  } else {
-    e.target.outerHTML = `<div class="sent"><div class="lcd"><div class="lcd-num small">YOU'RE IN</div><div class="lcd-lab">${esc(email)}</div></div>
-      <p>${listed ? 'You’re on the early-access list and subscribed to Noise Floor. We’ll email you the moment accounts open.' : ''}</p>${CFG.telegramUrl ? `<a class="key tg" href="${esc(CFG.telegramUrl)}" target="_blank" rel="noopener">Join the alert channel</a>` : ''}</div>`;
+const AF = { mode: 'signup', step: 'start', email: '', err: '', info: '', busy: false, resendAt: 0, purpose: 'signup' };
+const EMAIL_OK = (e) => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(e);
+function friendly(msg = '') {
+  if (/invalid login credentials/i.test(msg)) return 'That email and password don’t match. Try again, or use a one-time code.';
+  if (/email not confirmed/i.test(msg)) return 'Confirm your email first. We just sent you a new code.';
+  if (/token has expired|invalid.*otp|otp.*invalid/i.test(msg)) return 'That code is wrong or expired. Check the latest email, or send a new code.';
+  if (/rate limit|too many/i.test(msg)) return 'Too many attempts. Wait a minute and try again.';
+  if (/password should be/i.test(msg)) return 'Choose a stronger password: at least 8 characters.';
+  return msg || 'Something went wrong. Try again.';
+}
+function pwScore(p) { let s = 0; if (p.length >= 8) s++; if (p.length >= 12) s++; if (/[A-Z]/.test(p) && /[a-z]/.test(p)) s++; if (/\d/.test(p)) s++; if (/[^\w]/.test(p)) s++; return Math.min(4, s); }
+const PW_LABEL = ['Too weak', 'Weak', 'Fair', 'Good', 'Strong'];
+
+function authShell(inner, { tabs = true } = {}) {
+  return `<div class="auth-wrap"><div class="panel auth-card">${screws}
+    <div class="auth-top"><span class="auth-brand">FLOWSTATE</span>${tabs ? `<div class="switch auth-tabs" role="tablist" aria-label="Account" style="--n:2;--bw:86px">
+      <button role="tab" aria-selected="${AF.mode === 'signup'}" aria-checked="${AF.mode === 'signup'}" data-afmode="signup">Sign up</button>
+      <button role="tab" aria-selected="${AF.mode === 'login'}" aria-checked="${AF.mode === 'login'}" data-afmode="login">Log in</button>
+      <span class="thumb" style="--i:${AF.mode === 'signup' ? 0 : 1}"></span></div>` : ''}</div>
+    ${inner}
+    <p class="nl-msg ${AF.err ? 'err' : ''}" id="afMsg" role="${AF.err ? 'alert' : 'status'}">${esc(AF.err || AF.info || '')}</p>
+  </div>
+  <p class="auth-legal">By continuing you agree to receive the Noise Floor newsletter (one email a week, unsubscribe anytime) and accept our <a href="#privacy">privacy policy</a>.</p></div>`;
+}
+const backLink = (to = 'start', label = 'Use a different email') => `<button type="button" class="linkbtn" data-afstep="${to}">${label}</button>`;
+
+function authStartHTML() {
+  const enabled = (CFG.providers || []).filter((p) => PROVIDERS[p]);
+  const signup = AF.mode === 'signup';
+  return authShell(`
+    <h1>${signup ? 'Create your Flowstate account' : 'Welcome back'}</h1>
+    <p class="auth-sub">${signup ? 'Follow money across chains, venues and wallets. Free to start.' : 'Log in to pick up where you left off.'}</p>
+    ${enabled.length ? `<div class="oauth">${enabled.map((p) => `<button type="button" class="key oauth-btn" data-oauth="${p}">${PROVIDERS[p].icon}<span>Continue with ${PROVIDERS[p].name}</span></button>`).join('')}</div>
+    <div class="or"><span>or with email</span></div>` : ''}
+    <form class="auth-form" data-afform="email" novalidate>
+      <label for="afEmail">Email</label>
+      <input id="afEmail" type="email" autocomplete="email" required value="${esc(AF.email)}" placeholder="you@domain.com">
+      <button class="key go" type="submit" ${AF.busy ? 'disabled' : ''}>Continue</button>
+    </form>
+    <p class="auth-switch">${signup ? 'Already have an account? <button type="button" class="linkbtn" data-afmode="login">Log in</button>' : 'New to Flowstate? <button type="button" class="linkbtn" data-afmode="signup">Create an account</button>'}</p>`);
+}
+
+function authPasswordHTML() {
+  const signup = AF.mode === 'signup';
+  return authShell(`
+    <h1>${signup ? 'Set a password' : 'Enter your password'}</h1>
+    <p class="auth-sub"><span class="email-pill">${esc(AF.email)}</span> ${backLink()}</p>
+    <form class="auth-form" data-afform="password" novalidate>
+      <label for="afPw">Password</label>
+      <div class="pw-row"><input id="afPw" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}" required minlength="8" placeholder="${signup ? 'At least 8 characters' : ''}">
+        <button type="button" class="linkbtn pw-toggle" data-pwtoggle aria-label="Show password">Show</button></div>
+      ${signup ? `<div class="pw-meter" aria-live="polite"><span class="bars">${'<i></i>'.repeat(4)}</span><span id="pwLabel">Use 8+ characters with a mix of letters, numbers and symbols</span></div>` : ''}
+      <button class="key go" type="submit" ${AF.busy ? 'disabled' : ''}>${signup ? 'Create account' : 'Log in'}</button>
+    </form>
+    ${signup ? '' : `<p class="auth-switch"><button type="button" class="linkbtn" data-afcode="login">Email me a code instead</button> <span class="dotsep"></span> <button type="button" class="linkbtn" data-afcode="recovery">Forgot password?</button></p>`}`, { tabs: false });
+}
+
+function authOtpHTML() {
+  const len = CFG.otpLength || 6;
+  const wait = Math.max(0, Math.ceil((AF.resendAt - Date.now()) / 1000));
+  const title = AF.purpose === 'recovery' ? 'Reset your password' : AF.purpose === 'login' ? 'Check your email' : 'Verify your email';
+  return authShell(`
+    <h1>${title}</h1>
+    <p class="auth-sub">We sent a ${len}-digit code to <span class="email-pill">${esc(AF.email)}</span>. It expires in 1 hour.</p>
+    <form class="auth-form" data-afform="otp" novalidate>
+      <fieldset class="otp" aria-label="${len}-digit code">${Array.from({ length: len }, (_, i) => `<input inputmode="numeric" pattern="[0-9]*" maxlength="1" aria-label="Digit ${i + 1}" ${i === 0 ? 'autocomplete="one-time-code"' : 'autocomplete="off"'} data-otp="${i}">`).join('')}</fieldset>
+      <button class="key go" type="submit" ${AF.busy ? 'disabled' : ''}>${AF.purpose === 'recovery' ? 'Continue' : 'Verify'}</button>
+    </form>
+    <p class="auth-switch"><button type="button" class="linkbtn" data-afresend ${wait ? 'disabled' : ''}>${wait ? `Resend code in ${wait}s` : 'Resend code'}</button> <span class="dotsep"></span> ${backLink()}</p>`, { tabs: false });
+}
+
+function authNewPwHTML() {
+  return authShell(`
+    <h1>Choose a new password</h1>
+    <p class="auth-sub">For <span class="email-pill">${esc(AF.email)}</span></p>
+    <form class="auth-form" data-afform="newpw" novalidate>
+      <label for="afPw">New password</label>
+      <div class="pw-row"><input id="afPw" type="password" autocomplete="new-password" required minlength="8" placeholder="At least 8 characters"><button type="button" class="linkbtn pw-toggle" data-pwtoggle>Show</button></div>
+      <div class="pw-meter"><span class="bars">${'<i></i>'.repeat(4)}</span><span id="pwLabel">Use 8+ characters</span></div>
+      <button class="key go" type="submit" ${AF.busy ? 'disabled' : ''}>Save password and log in</button>
+    </form>`, { tabs: false });
+}
+
+function earlyAccessHTML() {
+  return `<div class="auth-wrap"><div class="panel auth-card">${screws}
+    <div class="auth-top"><span class="auth-brand">FLOWSTATE</span><span class="led demo" title="Accounts opening soon"></span></div>
+    <h1>Accounts open soon</h1><p class="auth-sub">Leave your email to get in first. You'll get the Noise Floor newsletter while you wait.</p>
+    <form id="eaForm" class="auth-form" novalidate><label for="eaEmail">Email</label><input id="eaEmail" type="email" autocomplete="email" required placeholder="you@domain.com"><button class="key go" type="submit">Get early access</button></form>
+    <p class="nl-msg" id="eaMsg" aria-live="polite"></p></div>
+    <p class="auth-legal">By continuing you agree to receive the Noise Floor newsletter. Unsubscribe anytime. <a href="#privacy">Privacy</a></p></div>`;
+}
+
+function authView(mode) {
+  if (AUTH.user) return `<div class="auth-wrap"><div class="panel auth-card">${screws}<div class="auth-top"><span class="auth-brand">FLOWSTATE</span><span class="led on"></span></div><h1>You're signed in</h1><p class="auth-sub">${esc(AUTH.user.email || '')}</p><a class="key go" href="#account">Open account</a></div></div>`;
+  if (AUTH.ready && !CFG.accounts) return earlyAccessHTML();
+  if (AF.mode !== mode && AF.step === 'start') AF.mode = mode;
+  return { start: authStartHTML, password: authPasswordHTML, otp: authOtpHTML, newpw: authNewPwHTML }[AF.step]();
+}
+VIEWS.signup = () => authView('signup');
+VIEWS.login = () => authView('login');
+function afGo(patch) { Object.assign(AF, { err: '', info: '' }, patch); render(); setTimeout(() => document.querySelector('.auth-card input:not([type=hidden])')?.focus(), 30); }
+function afErr(msg) { AF.busy = false; AF.err = friendly(msg); const m = $('#afMsg'); if (m) { m.textContent = AF.err; m.className = 'nl-msg err'; m.setAttribute('role', 'alert'); } document.querySelectorAll('.auth-card button[type=submit]').forEach((b) => (b.disabled = false)); }
+async function addToList(email, source) { try { await postJSON('/api/subscribe', { email, source }); } catch {} }
+let resendTimer = 0;
+function startResendClock() { AF.resendAt = Date.now() + 60_000; clearInterval(resendTimer); resendTimer = setInterval(() => { const b = document.querySelector('[data-afresend]'); if (!b) return clearInterval(resendTimer); const w = Math.ceil((AF.resendAt - Date.now()) / 1000); b.disabled = w > 0; b.textContent = w > 0 ? `Resend code in ${w}s` : 'Resend code'; if (w <= 0) clearInterval(resendTimer); }, 1000); }
+
+async function sendCode(purpose) {
+  const sb = AUTH.sb.auth;
+  const r = purpose === 'signup' ? await sb.resend({ type: 'signup', email: AF.email })
+    : purpose === 'recovery' ? await sb.resetPasswordForEmail(AF.email)
+    : await sb.signInWithOtp({ email: AF.email, options: { shouldCreateUser: false } });
+  return r.error;
+}
+
+document.addEventListener('click', async (e) => {
+  const m = e.target.closest('[data-afmode]'); if (m) { e.preventDefault(); AF.step = 'start'; AF.mode = m.dataset.afmode; location.hash = AF.mode; return afGo({}); }
+  const st = e.target.closest('[data-afstep]'); if (st) return afGo({ step: st.dataset.afstep });
+  const t = e.target.closest('[data-pwtoggle]'); if (t) { const i = $('#afPw'); const show = i.type === 'password'; i.type = show ? 'text' : 'password'; t.textContent = show ? 'Hide' : 'Show'; t.setAttribute('aria-label', show ? 'Hide password' : 'Show password'); return; }
+  const o = e.target.closest('[data-oauth]');
+  if (o) {
+    o.disabled = true;
+    const { error } = await AUTH.sb.auth.signInWithOAuth({ provider: o.dataset.oauth, options: { redirectTo: `${location.origin}/` } });
+    if (error) { o.disabled = false; afErr(error.message); }
+    return;
+  }
+  const c = e.target.closest('[data-afcode]');
+  if (c) { AF.purpose = c.dataset.afcode; c.disabled = true; const err = await sendCode(AF.purpose); if (err) return afErr(err.message); startResendClock(); return afGo({ step: 'otp', info: '' }); }
+  const rs = e.target.closest('[data-afresend]');
+  if (rs && !rs.disabled) { rs.disabled = true; const err = await sendCode(AF.purpose); if (err) return afErr(err.message); startResendClock(); AF.info = 'New code sent.'; const mm = $('#afMsg'); if (mm) { mm.textContent = AF.info; mm.className = 'nl-msg'; } }
+});
+
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'afPw' && $('.pw-meter')) {
+    const sc = pwScore(e.target.value);
+    document.querySelectorAll('.pw-meter i').forEach((b, i) => b.classList.toggle('on', i < sc));
+    $('.pw-meter').dataset.score = sc; $('#pwLabel').textContent = e.target.value ? PW_LABEL[sc] : 'Use 8+ characters with a mix of letters, numbers and symbols';
+  }
+  const d = e.target.closest?.('[data-otp]');
+  if (d) {
+    const v = d.value.replace(/\D/g, '');
+    const boxes = [...document.querySelectorAll('[data-otp]')];
+    if (v.length > 1) { v.split('').slice(0, boxes.length).forEach((ch, i) => (boxes[i].value = ch)); boxes[Math.min(v.length, boxes.length) - 1].focus(); }
+    else { d.value = v; if (v && d.nextElementSibling) d.nextElementSibling.focus(); }
+    if (boxes.every((b) => b.value)) document.querySelector('[data-afform="otp"]').requestSubmit();
   }
 });
-document.addEventListener('click', (e) => { if (e.target.id === 'resend') { e.preventDefault(); render(); } });
+document.addEventListener('keydown', (e) => {
+  const d = e.target.closest?.('[data-otp]');
+  if (d && e.key === 'Backspace' && !d.value && d.previousElementSibling) d.previousElementSibling.focus();
+});
+document.addEventListener('paste', (e) => {
+  const d = e.target.closest?.('[data-otp]'); if (!d) return;
+  const v = (e.clipboardData.getData('text') || '').replace(/\D/g, ''); if (!v) return;
+  e.preventDefault(); const boxes = [...document.querySelectorAll('[data-otp]')];
+  v.split('').slice(0, boxes.length).forEach((ch, i) => (boxes[i].value = ch));
+  if (boxes.every((b) => b.value)) document.querySelector('[data-afform="otp"]').requestSubmit(); else boxes[Math.min(v.length, boxes.length - 1)].focus();
+});
 
-// ---------------- onboarding survey
+document.addEventListener('submit', async (e) => {
+  if (e.target.id === 'eaForm') {
+    e.preventDefault();
+    const email = $('#eaEmail').value.trim(), msg = $('#eaMsg');
+    if (!EMAIL_OK(email)) { msg.textContent = 'Enter a valid email address.'; msg.className = 'nl-msg err'; return; }
+    try { await postJSON('/api/subscribe', { email, source: 'early-access' }); e.target.outerHTML = `<div class="sent"><div class="lcd"><div class="lcd-num small">YOU'RE IN</div><div class="lcd-lab">${esc(email)}</div></div><p class="auth-sub">You're on the early-access list and subscribed to Noise Floor.</p></div>`; msg.textContent = ''; }
+    catch (err) { msg.textContent = err.message; msg.className = 'nl-msg err'; }
+    return;
+  }
+  const f = e.target.closest('[data-afform]'); if (!f) return;
+  e.preventDefault();
+  if (!AUTH.sb) return afErr('Sign-in is still loading. Try again in a moment.');
+  const kind = f.dataset.afform, sb = AUTH.sb.auth;
+  const btn = f.querySelector('button[type=submit]'); btn.disabled = true; AF.busy = true;
+  try {
+    if (kind === 'email') {
+      const email = $('#afEmail').value.trim().toLowerCase();
+      if (!EMAIL_OK(email)) return afErr('Enter a valid email address.');
+      AF.email = email; AF.busy = false;
+      if (AF.mode === 'signup') addToList(email, 'signup');
+      return afGo({ step: 'password' });
+    }
+    if (kind === 'password') {
+      const pw = $('#afPw').value;
+      if (AF.mode === 'signup') {
+        if (pw.length < 8) return afErr('Use at least 8 characters.');
+        if (pwScore(pw) < 2) return afErr('That password is easy to guess. Add numbers, capitals or symbols.');
+        const { data, error } = await sb.signUp({ email: AF.email, password: pw, options: { emailRedirectTo: `${location.origin}/` } });
+        if (error) return afErr(error.message);
+        if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) { AF.mode = 'login'; return afGo({ step: 'password', info: 'You already have an account. Enter your password to log in.' }); }
+        if (data.session) { AF.busy = false; return; } // email confirmation disabled: signed straight in
+        AF.purpose = 'signup'; startResendClock(); AF.busy = false;
+        return afGo({ step: 'otp' });
+      }
+      const { error } = await sb.signInWithPassword({ email: AF.email, password: pw });
+      if (error) {
+        if (/not confirmed/i.test(error.message)) { AF.purpose = 'signup'; await sendCode('signup'); startResendClock(); AF.busy = false; return afGo({ step: 'otp', info: 'Confirm your email to finish logging in.' }); }
+        return afErr(error.message);
+      }
+      AF.busy = false; return;
+    }
+    if (kind === 'otp') {
+      const token = [...document.querySelectorAll('[data-otp]')].map((b) => b.value).join('');
+      if (token.length < (CFG.otpLength || 6)) return afErr('Enter the full code.');
+      const type = AF.purpose === 'recovery' ? 'recovery' : AF.purpose === 'login' ? 'email' : 'signup';
+      const { error } = await sb.verifyOtp({ email: AF.email, token, type });
+      if (error) { document.querySelectorAll('[data-otp]').forEach((b) => (b.value = '')); document.querySelector('[data-otp]')?.focus(); return afErr(error.message); }
+      AF.busy = false;
+      if (type === 'recovery') { AF.recovering = true; return afGo({ step: 'newpw' }); }
+      return;
+    }
+    if (kind === 'newpw') {
+      const pw = $('#afPw').value;
+      if (pw.length < 8 || pwScore(pw) < 2) return afErr('Choose a stronger password: 8+ characters with numbers or symbols.');
+      const { error } = await sb.updateUser({ password: pw });
+      if (error) return afErr(error.message);
+      AF.busy = false; AF.recovering = false; toast('Password updated. You’re logged in.');
+      const p = AUTH.profile; location.hash = p?.onboarded_at ? 'flowmap' : 'onboarding';
+    }
+  } catch (err) { afErr(err.message); }
+});
+
+// ---------------- onboarding: five questions, then done
 const SURVEY = [
-  { key: 'persona', q: 'What best describes you?', type: 'one', opts: [['trader', 'Active trader'], ['investor', 'Long-term investor'], ['fund', 'Fund or institution'], ['builder', 'Founder or builder'], ['analyst', 'Analyst or researcher'], ['creator', 'Creator or media'], ['exploring', 'Just exploring']] },
+  { key: 'persona', q: 'What best describes you?', hint: 'We tailor the dashboard and alerts to how you work.', type: 'one', cards: true, opts: [
+    ['trader', 'Active trader', 'Daily to weekly positions, spot or perps'], ['investor', 'Long-term investor', 'Allocating across cycles'], ['fund', 'Fund or institution', 'Managing outside capital'],
+    ['builder', 'Founder or builder', 'Building in crypto or fintech'], ['analyst', 'Analyst or researcher', 'Writing, modelling, advising'], ['creator', 'Creator or media', 'Covering markets for an audience'], ['exploring', 'Just exploring', 'Learning how money moves']] },
   { key: 'markets', q: 'Which markets do you follow?', hint: 'Pick all that apply.', type: 'many', opts: [['majors', 'BTC and ETH'], ['alts', 'Altcoins and memecoins'], ['defi', 'DeFi'], ['stables', 'Stablecoins and payments'], ['perps', 'Perps and derivatives'], ['prediction', 'Prediction markets'], ['rwa', 'RWA and tokenized assets'], ['equities', 'US stocks and ETFs'], ['macro', 'Rates and macro']] },
-  { key: 'capital', q: 'Roughly how much capital do you trade or manage?', hint: 'Optional. Helps us build the right tools.', type: 'one', optional: true, opts: [['lt10k', 'Under $10K'], ['10k-100k', '$10K to $100K'], ['100k-1m', '$100K to $1M'], ['1m-10m', '$1M to $10M'], ['10m+', 'Over $10M'], ['na', 'Prefer not to say']] },
-  { key: 'goals', q: 'What do you want from Flowstate?', type: 'many', opts: [['rotation', 'Spot rotations early'], ['whales', 'Follow whales'], ['macro', 'Macro and liquidity context'], ['research', 'Research and content'], ['alerts', 'Alerts on my phone'], ['data', 'Data for my own models']],
-    extra: [{ key: 'region', label: 'Where are you based?', opts: [['india', 'India'], ['us', 'United States'], ['europe', 'Europe'], ['asia', 'Asia (other)'], ['mena', 'Middle East'], ['latam', 'Latin America'], ['africa', 'Africa'], ['other', 'Elsewhere']] },
-            { key: 'heard_from', label: 'How did you find us?', opts: [['x', 'X'], ['newsletter', 'Newsletter'], ['telegram', 'Telegram'], ['friend', 'A friend'], ['search', 'Search'], ['other', 'Other']] }] },
-  { key: 'finish', q: 'Stay in the loop', type: 'finish' },
+  { key: 'capital', q: 'How much capital do you trade or manage?', hint: 'Optional, and only used in aggregate to plan features.', type: 'one', optional: true, opts: [['lt10k', 'Under $10K'], ['10k-100k', '$10K to $100K'], ['100k-1m', '$100K to $1M'], ['1m-10m', '$1M to $10M'], ['10m+', 'Over $10M'], ['na', 'Prefer not to say']] },
+  { key: 'goals', q: 'What do you want from Flowstate?', hint: 'Pick all that apply.', type: 'many', cards: true, opts: [['rotation', 'Spot rotations early', 'See sectors and chains turn before price'], ['whales', 'Follow whales', 'Money trails on the wallets that matter'], ['macro', 'Macro context', 'Rates, liquidity, ETF flows'], ['alerts', 'Alerts on my phone', 'Telegram pings for big moves'], ['research', 'Research', 'Weekly reads from Noise Floor'], ['data', 'Data for my models', 'API and exports']] },
+  { key: 'region', q: 'A little about you', type: 'one', opts: [['india', 'India'], ['us', 'United States'], ['europe', 'Europe'], ['asia', 'Asia (other)'], ['mena', 'Middle East'], ['latam', 'Latin America'], ['africa', 'Africa'], ['other', 'Elsewhere']], label: 'Where are you based?',
+    extra: [{ key: 'heard_from', label: 'How did you find Flowstate?', opts: [['x', 'X'], ['newsletter', 'Newsletter'], ['telegram', 'Telegram'], ['friend', 'A friend'], ['search', 'Search'], ['other', 'Other']] }] },
 ];
-const OB = { step: 0, a: {} };
-function obInit() { const p = AUTH.profile || {}; OB.a = { persona: p.persona, markets: p.markets || [], capital: p.capital, goals: p.goals || [], region: p.region, heard_from: p.heard_from, newsletter: p.newsletter ?? true, telegram: p.telegram || '' }; }
+const OB = { step: 0, a: {}, inited: false, done: false };
+function obInit() { const p = AUTH.profile || {}; OB.a = { persona: p.persona, markets: p.markets || [], capital: p.capital, goals: p.goals || [], region: p.region, heard_from: p.heard_from }; }
+function obChip(key, [v, l, d], many, card) {
+  const on = many ? (OB.a[key] || []).includes(v) : OB.a[key] === v;
+  return `<button type="button" class="${card ? 'optcard' : 'chip'}${on ? ' on' : ''}" role="${many ? 'checkbox' : 'radio'}" aria-checked="${on}" data-ob="${key}" data-v="${v}" data-many="${many ? 1 : 0}">${card ? `<span class="oc-t">${l}</span><span class="oc-d">${d}</span>${many ? '<span class="oc-box" aria-hidden="true"></span>' : ''}` : l}</button>`;
+}
+function obValid(st) { const has = (k, many) => (many ? (OB.a[k] || []).length : OB.a[k]); return st.optional || (has(st.key, st.type === 'many') && (st.extra || []).every((x) => OB.a[x.key])); }
 
 VIEWS.onboarding = function () {
-  if (!AUTH.user) return `<div class="panel narrow"><h1>Sign in first</h1><p>The setup saves to your account.</p><a class="key go" href="#login">Sign in</a></div>`;
+  if (!AUTH.user) return authView('signup');
   if (!OB.inited) { obInit(); OB.inited = true; }
-  const st = SURVEY[OB.step];
-  const chip = (key, v, l, many) => { const on = many ? (OB.a[key] || []).includes(v) : OB.a[key] === v; return `<button type="button" class="chip${on ? ' on' : ''}" role="${many ? 'checkbox' : 'radio'}" aria-checked="${on}" data-ob="${key}" data-v="${v}" data-many="${many ? 1 : 0}">${l}</button>`; };
-  let body = '';
-  if (st.type === 'finish') {
-    body = `<label class="toggle"><input type="checkbox" id="obNl" ${OB.a.newsletter ? 'checked' : ''}><span class="tg-track"><span class="tg-thumb"></span></span><span>Send me the Noise Floor newsletter at ${esc(AUTH.user.email)}</span></label>
-      <label class="field">Telegram username (optional)<input id="obTg" value="${esc(OB.a.telegram || '')}" placeholder="@yourhandle" maxlength="40"></label>
-      ${CFG.telegramUrl ? `<a class="key tg" href="${esc(CFG.telegramUrl)}" target="_blank" rel="noopener">Join the alert channel</a>` : ''}
-      <p class="fine">We use your answers to tailor Flowstate and plan new features. We never sell your data. <a href="#privacy">Privacy</a></p>`;
-  } else {
-    body = `<div class="chips" role="${st.type === 'many' ? 'group' : 'radiogroup'}" aria-label="${esc(st.q)}">${st.opts.map(([v, l]) => chip(st.key, v, l, st.type === 'many')).join('')}</div>
-      ${(st.extra || []).map((x) => `<div class="sub-q">${x.label}</div><div class="chips small" role="radiogroup" aria-label="${x.label}">${x.opts.map(([v, l]) => chip(x.key, v, l, false)).join('')}</div>`).join('')}`;
-  }
-  const ok = st.type === 'finish' || st.optional || (st.type === 'many' ? (OB.a[st.key] || []).length : OB.a[st.key]);
-  return `<div class="panel ob">${screws}
-    <div class="panel-bar"><span>Setup</span><span class="steps" aria-label="Step ${OB.step + 1} of ${SURVEY.length}">${SURVEY.map((_, i) => `<i class="${i < OB.step ? 'done' : i === OB.step ? 'now' : ''}"></i>`).join('')}</span></div>
-    <h1>${st.q}</h1>${st.hint ? `<p class="hint">${st.hint}</p>` : ''}
-    ${body}
+  if (OB.done) return welcomeHTML();
+  const st = SURVEY[OB.step], n = SURVEY.length;
+  return `<div class="auth-wrap wide"><div class="panel ob">${screws}
+    <div class="ob-top"><span class="auth-brand">FLOWSTATE</span><span class="ob-count">Step ${OB.step + 1} of ${n}</span></div>
+    <div class="ob-progress" role="progressbar" aria-valuemin="1" aria-valuemax="${n}" aria-valuenow="${OB.step + 1}">${SURVEY.map((_, i) => `<i class="${i < OB.step ? 'done' : i === OB.step ? 'now' : ''}"></i>`).join('')}</div>
+    <h1>${st.q}</h1>${st.hint ? `<p class="auth-sub">${st.hint}</p>` : ''}
+    ${st.label ? `<div class="sub-q">${st.label}</div>` : ''}
+    <div class="${st.cards ? 'optgrid' : 'chips'}" role="${st.type === 'many' ? 'group' : 'radiogroup'}" aria-label="${esc(st.label || st.q)}">${st.opts.map((o) => obChip(st.key, o, st.type === 'many', st.cards)).join('')}</div>
+    ${(st.extra || []).map((x) => `<div class="sub-q">${x.label}</div><div class="chips" role="radiogroup" aria-label="${x.label}">${x.opts.map((o) => obChip(x.key, o, false, false)).join('')}</div>`).join('')}
     <div class="ob-nav">${OB.step ? '<button type="button" class="key" data-obnav="-1">Back</button>' : '<span></span>'}
-      <button type="button" class="key go" data-obnav="1" ${ok ? '' : 'disabled'}>${st.type === 'finish' ? 'Finish setup' : 'Next'}</button></div>
+      <div class="ob-right">${st.optional ? '<button type="button" class="linkbtn" data-obnav="skip">Skip</button>' : ''}<button type="button" class="key go" data-obnav="1" ${obValid(st) ? '' : 'disabled'}>${OB.step === n - 1 ? 'Finish' : 'Continue'}</button></div></div>
     <p class="nl-msg" id="obMsg" aria-live="polite"></p>
-  </div>`;
+  </div></div>`;
 };
+
+function welcomeHTML() {
+  const p = AUTH.profile || {};
+  const persona = SURVEY[0].opts.find(([v]) => v === p.persona)?.[1];
+  return `<div class="auth-wrap"><div class="panel auth-card">${screws}
+    <div class="ob-top"><span class="auth-brand">FLOWSTATE</span><span class="led on"></span></div>
+    <div class="lcd welcome"><div class="lcd-num small">ALL SET</div><div class="lcd-lab">${esc(AUTH.user.email || '')}${persona ? `, ${esc(persona)}` : ''}</div></div>
+    <h1>Welcome to Flowstate</h1>
+    <p class="auth-sub">Flow scope now opens on the markets you follow. Two more ways to stay ahead:</p>
+    <label class="toggle"><input type="checkbox" id="wNl" ${p.newsletter !== false ? 'checked' : ''}><span class="tg-track"><span class="tg-thumb"></span></span><span>Noise Floor newsletter, weekly</span></label>
+    ${CFG.telegramUrl ? `<div class="w-tg"><span>Alerts on Telegram for big moves</span><a class="key tg small" href="${esc(CFG.telegramUrl)}" target="_blank" rel="noopener">Join channel</a></div>` : ''}
+    <button type="button" class="key go wide-btn" data-welcome>Open Flow scope</button>
+  </div></div>`;
+}
+
 document.addEventListener('click', async (e) => {
   const c = e.target.closest('[data-ob]');
   if (c) {
     const k = c.dataset.ob, v = c.dataset.v;
     if (c.dataset.many === '1') { const arr = OB.a[k] || []; OB.a[k] = arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]; }
-    else OB.a[k] = OB.a[k] === v ? null : v;
+    else OB.a[k] = OB.a[k] === v && SURVEY[OB.step].optional ? null : v;
     const y = scrollY; render(); scrollTo(0, y); return;
   }
+  const w = e.target.closest('[data-welcome]');
+  if (w) {
+    const on = $('#wNl').checked;
+    if (on !== (AUTH.profile?.newsletter !== false)) {
+      const { data } = await AUTH.sb.auth.getSession();
+      postJSON(on ? '/api/subscribe' : '/api/unsubscribe', { email: AUTH.user.email, source: 'onboarding', persona: AUTH.profile?.persona, userId: AUTH.user.id }, data.session?.access_token).catch(() => {});
+      await AUTH.sb.from('profiles').update({ newsletter: on }).eq('id', AUTH.user.id); AUTH.profile.newsletter = on;
+    }
+    OB.done = false; OB.inited = false; location.hash = 'flowmap'; return;
+  }
   const n = e.target.closest('[data-obnav]'); if (!n || n.disabled) return;
-  const dir = Number(n.dataset.obnav);
-  if (dir < 0) { OB.step = Math.max(0, OB.step - 1); return render(); }
-  if (OB.step < SURVEY.length - 1) { OB.step++; return render(); }
-  OB.a.newsletter = $('#obNl').checked; OB.a.telegram = $('#obTg').value.trim().replace(/^@?/, '@').replace(/^@$/, '');
+  if (n.dataset.obnav === '-1') { OB.step = Math.max(0, OB.step - 1); return render(); }
+  if (n.dataset.obnav === 'skip') OB.a[SURVEY[OB.step].key] = null;
+  if (OB.step < SURVEY.length - 1) { OB.step++; scrollTo(0, 0); return render(); }
   n.disabled = true; $('#obMsg').textContent = 'Saving…';
-  const row = { id: AUTH.user.id, email: AUTH.user.email, ...OB.a, onboarded_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+  const row = { id: AUTH.user.id, email: AUTH.user.email, ...OB.a, newsletter: AUTH.profile?.newsletter ?? true, onboarded_at: new Date().toISOString(), updated_at: new Date().toISOString() };
   const { error } = await AUTH.sb.from('profiles').upsert(row);
   if (error) { $('#obMsg').textContent = `Could not save: ${error.message}`; $('#obMsg').className = 'nl-msg err'; n.disabled = false; return; }
-  if (OB.a.newsletter) postJSON('/api/subscribe', { email: AUTH.user.email, source: 'onboarding', persona: OB.a.persona, userId: AUTH.user.id }).catch(() => {});
-  AUTH.profile = row; OB.inited = false; OB.step = 0; applyPersona.done = false; applyPersona(row);
-  location.hash = 'flowmap'; toast('Setup saved. Flow scope now opens on your markets.');
+  if (row.newsletter) postJSON('/api/subscribe', { email: AUTH.user.email, source: 'onboarding', persona: OB.a.persona, userId: AUTH.user.id }).catch(() => {});
+  AUTH.profile = row; OB.step = 0; OB.done = true; applyPersona.done = false; applyPersona(row);
+  render(); scrollTo(0, 0);
 });
 
 // ---------------- account
-const LABEL = Object.fromEntries(SURVEY.flatMap((s) => [...(s.opts || []), ...(s.extra || []).flatMap((x) => x.opts)]));
+const LABEL = Object.fromEntries(SURVEY.flatMap((s) => [...(s.opts || []), ...(s.extra || []).flatMap((x) => x.opts)]).map(([v, l]) => [v, l]));
 VIEWS.account = function () {
   if (!AUTH.user) return `<div class="panel narrow"><h1>Sign in to see your account</h1><a class="key go" href="#login">Sign in</a></div>`;
   const p = AUTH.profile || {};
@@ -690,7 +903,7 @@ VIEWS.account = function () {
 document.addEventListener('click', async (e) => {
   const b = e.target.closest('[data-act]'); if (!b) return;
   if (b.dataset.act === 'out') { await AUTH.sb.auth.signOut(); toast('Signed out.'); location.hash = 'flowmap'; }
-  if (b.dataset.act === 'edit') { OB.inited = false; OB.step = 0; location.hash = 'onboarding'; }
+  if (b.dataset.act === 'edit') { OB.inited = false; OB.step = 0; OB.done = false; location.hash = 'onboarding'; }
   if (b.dataset.act === 'nl') {
     const on = !AUTH.profile?.newsletter; b.disabled = true;
     try {
@@ -800,7 +1013,7 @@ VIEWS.trails = function () {
   </section>`;
 };
 
-function trailHTML(t) {
+function trailCardHTML(t) {
   const steps = t.steps.map((s, i) => {
     const gap = i ? s.ts - t.steps[i - 1].ts : 0;
     const gapTxt = i ? `<span class="hop">${gap < 60e3 ? 'seconds' : gap < 5400e3 ? Math.round(gap / 60e3) + ' min' : (gap / 3600e3).toFixed(1).replace(/\.0$/, '') + ' h'} later</span>` : '';
@@ -833,7 +1046,7 @@ function trailsReadout(d) {
 function paintTrails() {
   const d = TR.data; if (!d || !$('#trList')) return;
   const list = (d.trails || []).filter((t) => t.size >= TR.min && (TR.filter === 'all' || t.type === TR.filter));
-  $('#trList').innerHTML = list.length ? list.map(trailHTML).join('')
+  $('#trList').innerHTML = list.length ? list.map(trailCardHTML).join('')
     : `<div class="screen tr-wait"><p>${d.status?.warmingUp ? 'Scanning the last 6 hours of Arbitrum and Ethereum. The first trails appear within a few minutes.' : 'No trails at this size and filter in the last 48 hours. Lower the minimum size or switch filter.'}</p>${d.status?.errors?.length ? `<p class="err">Last data error: ${esc(d.status.errors[0].msg)}</p>` : ''}</div>`;
   const ro = $('#trRead'); ro.innerHTML = trailsReadout(d);
   const nd = ro.querySelector('.needle'); if (nd) requestAnimationFrame(() => requestAnimationFrame(() => { nd.style.transform = `rotate(${nd.dataset.ang}deg)`; }));
@@ -857,7 +1070,7 @@ function render() {
   document.querySelectorAll('#tabs a').forEach((a) => { const on = a.getAttribute('href') === '#' + tabFor; a.classList.toggle('on', on); if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
   if (r === 'flowmap' && $('#fmsvg') && !render.force) { $('#updated').textContent = S.updated ? `updated ${ago(S.updated)}` : 'loading…'; loadFlow(); return; }
   const html = VIEWS[r]();
-  $('#view').innerHTML = ['flowmap', 'trails', 'login', 'onboarding', 'account'].includes(r) ? html : `<section class="rack page-rack">${screws}${html}</section>`;
+  $('#view').innerHTML = ['flowmap', 'trails', 'login', 'signup', 'onboarding', 'account'].includes(r) ? html : `<section class="rack page-rack">${screws}${html}</section>`;
   if (r === 'flowmap') mountFlow();
   MOUNTS[r]?.();
   paintTape();
