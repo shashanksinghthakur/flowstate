@@ -13,6 +13,7 @@ import { createTrails } from './lib/trails.js';
 import { appendFile, writeFile, mkdir } from 'node:fs/promises';
 
 const ROOT = fileURLToPath(new URL('./public/', import.meta.url));
+const BUILD = (process.env.RENDER_GIT_COMMIT || String(Date.now())).slice(0, 12);
 const PORT = Number(process.env.PORT || 8787);
 const FRED_KEY = process.env.FRED_API_KEY || '';
 const CG_KEY = process.env.COINGECKO_API_KEY || '';
@@ -773,8 +774,12 @@ const server = http.createServer(async (req, res) => {
   const p = normalize(join(ROOT, url.pathname === '/' ? 'index.html' : url.pathname));
   if (!p.startsWith(ROOT)) { res.writeHead(403); return res.end(); }
   try {
-    const data = await readFile(p);
-    res.writeHead(200, { 'content-type': MIME[extname(p)] || 'application/octet-stream' });
+    let data = await readFile(p);
+    const isHtml = extname(p) === '.html';
+    if (isHtml) data = data.toString().replaceAll('__BUILD__', BUILD);
+    // HTML always revalidates; versioned assets (?v=BUILD) can be cached for a day.
+    const cc = isHtml || !url.searchParams.has('v') ? 'no-cache' : 'public, max-age=86400, immutable';
+    res.writeHead(200, { 'content-type': MIME[extname(p)] || 'application/octet-stream', 'cache-control': cc });
     res.end(data);
   } catch { res.writeHead(404); res.end('not found'); }
 });
