@@ -12,6 +12,8 @@ const ROOT = fileURLToPath(new URL('./public/', import.meta.url));
 const PORT = Number(process.env.PORT || 8787);
 const FRED_KEY = process.env.FRED_API_KEY || '';
 const CG_KEY = process.env.COINGECKO_API_KEY || '';
+const ALPACA_ID = process.env.ALPACA_KEY_ID || '';
+const ALPACA_SECRET = process.env.ALPACA_SECRET || '';
 const UA = 'Mozilla/5.0 (Flowstate; +https://github.com/) AppleWebKit/537.36 Chrome/124 Safari/537.36';
 
 // ---------------------------------------------------------------- utilities
@@ -34,6 +36,16 @@ async function getJSON(url, headers = {}, timeout = 15000) {
     const r = await fetch(url, { headers: { 'user-agent': UA, accept: 'application/json', ...headers }, signal: ctl.signal });
     if (!r.ok) throw new Error(`${r.status} ${url}`);
     return await r.json();
+  } finally { clearTimeout(timer); }
+}
+
+async function getText(url, headers = {}, timeout = 15000) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeout);
+  try {
+    const r = await fetch(url, { headers: { 'user-agent': UA, ...headers }, signal: ctl.signal });
+    if (!r.ok) throw new Error(`${r.status} ${url}`);
+    return await r.text();
   } finally { clearTimeout(timer); }
 }
 
@@ -202,29 +214,89 @@ export function summarise(sym, d) {
   };
 }
 
+// Alpaca (needs free keys). Daily bars from the consolidated SIP feed are free once
+// they are 15+ minutes old, so volume is full-market; latest price comes from IEX in real time.
+async function alpacaBars(syms) {
+  return cached('alpaca:bars', tradTTL(), async () => {
+    const h = { 'APCA-API-KEY-ID': ALPACA_ID, 'APCA-API-SECRET-KEY': ALPACA_SECRET };
+    const start = new Date(Date.now() - 100 * 864e5).toISOString();
+    const end = new Date(Date.now() - 16 * 60e3).toISOString();
+    const bars = {};
+    let token = '';
+    do {
+      const j = await getJSON(`https://data.alpaca.markets/v2/stocks/bars?symbols=${syms.join(',')}&timeframe=1Day&start=${start}&end=${end}&feed=sip&adjustment=raw&limit=10000${token ? `&page_token=${token}` : ''}`, h);
+      for (const [sym, arr] of Object.entries(j.bars || {})) (bars[sym] ||= []).push(...arr.map((b) => ({ t: Date.parse(b.t), o: b.o, h: b.h, l: b.l, c: b.c, v: b.v })));
+      token = j.next_page_token || '';
+    } while (token);
+    let latest = {};
+    try { latest = (await getJSON(`https://data.alpaca.markets/v2/stocks/trades/latest?symbols=${syms.join(',')}&feed=iex`, h)).trades || {}; } catch {}
+    return Object.fromEntries(Object.entries(bars).filter(([, b]) => b.length).map(([sym, b]) => [sym, {
+      sym, price: latest[sym]?.p ?? b.at(-1).c, asOf: latest[sym]?.t ? Date.parse(latest[sym].t) : b.at(-1).t, bars: b,
+    }]));
+  });
+}
+
+// Stooq: free daily CSV, no key. Used when Alpaca keys are absent and Yahoo refuses the server.
+export async function stooq(sym) {
+  return cached(`s:${sym}`, tradTTL(), async () => {
+    const txt = await getText(`https://stooq.com/q/d/l/?s=${encodeURIComponent(sym.toLowerCase())}.us&i=d`);
+    const lines = txt.trim().split(/\r?\n/);
+    if (!/^date/i.test(lines[0] || '')) throw new Error('stooq: no data');
+    const bars = lines.slice(1).slice(-70).map((l) => { const [d, o, h, lo, c, v] = l.split(','); return { t: Date.parse(d), o: +o, h: +h, l: +lo, c: +c, v: +v }; })
+      .filter((b) => b.c > 0);
+    if (!bars.length) throw new Error('stooq: empty');
+    return { sym, price: bars.at(-1).c, asOf: bars.at(-1).t, bars };
+  });
+}
+
 async function tradfi() {
   return cached('tradfi', tradTTL(), async () => {
     const syms = Object.values(TRADFI).flat();
-    const res = await pool(syms, 5, yahoo);
-    const bySym = Object.fromEntries(syms.map((s, i) => [s, res[i]]));
+    let bySym = {}, source = '';
+    if (ALPACA_ID && ALPACA_SECRET) {
+      try { bySym = await alpacaBars(syms); source = 'Alpaca (SIP daily bars + IEX last trade)'; } catch (e) { console.warn('alpaca', e.message); }
+    }
+    const missing = syms.filter((s) => !bySym[s]);
+    if (missing.length) {
+      const res = await pool(missing, 4, async (s) => { try { return await yahoo(s); } catch { return await stooq(s); } });
+      missing.forEach((s, i) => { if (res[i]?.bars) bySym[s] = res[i]; });
+      source ||= 'Yahoo / Stooq daily OHLCV';
+    }
     const groups = Object.entries(TRADFI).map(([group, list]) => ({
-      group, rows: list.filter((s) => bySym[s]?.bars).map((s) => summarise(s, bySym[s])),
+      group, rows: list.filter((s) => bySym[s]?.bars?.length).map((s) => summarise(s, bySym[s])),
     }));
-    return { source: 'Yahoo Finance daily OHLCV; flow = money-flow-volume proxy', updated: Date.now(), marketOpen: usMarketOpen(), groups };
+    return { source: `${source}; flow = money-flow-volume proxy`, updated: Date.now(), marketOpen: usMarketOpen(), groups };
+  });
+}
+
+// Rates & dollar. FRED (free key) is the reliable server-side source; Yahoo is the fallback.
+const FRED_MACRO = { '^IRX': 'DGS3MO', '^FVX': 'DGS5', '^TNX': 'DGS10', '^TYX': 'DGS30', '^VIX': 'VIXCLS', 'DX-Y.NYB': 'DTWEXBGS' };
+async function fredSeries(id) {
+  return cached(`fred:${id}`, 3_600_000, async () => {
+    const j = await getJSON(`https://api.stlouisfed.org/fred/series/observations?series_id=${id}&api_key=${FRED_KEY}&file_type=json&sort_order=desc&limit=45`);
+    return (j.observations || []).filter((o) => o.value !== '.' && o.value != null).map((o) => ({ t: Date.parse(o.date), c: Number(o.value) })).reverse();
   });
 }
 
 async function macro() {
   return cached('macro', tradTTL(), async () => {
     const syms = Object.keys(MACRO);
-    const res = await pool(syms, 3, yahoo);
-    const rows = syms.map((s, i) => {
-      const d = res[i];
-      if (!d?.bars) return null;
-      const c = d.bars.map((x) => x.c);
-      return { sym: s, label: MACRO[s], asOf: d.asOf, value: d.price ?? c.at(-1), prev: c.at(-2), monthAgo: c.at(-22) ?? c[0], spark: c.slice(-30) };
-    }).filter(Boolean);
-    return { source: 'Yahoo Finance', updated: Date.now(), marketOpen: usMarketOpen(), rows };
+    const res = await pool(syms, 3, async (s) => {
+      if (FRED_KEY) {
+        try {
+          const obs = await fredSeries(FRED_MACRO[s]);
+          if (obs.length > 2) return { sym: s, label: s === 'DX-Y.NYB' ? 'Dollar (broad)' : MACRO[s], src: 'FRED', obs };
+        } catch {}
+      }
+      const d = await yahoo(s);
+      return { sym: s, label: MACRO[s], src: 'Yahoo', obs: d.bars.map((b) => ({ t: b.t, c: b.c })), price: d.price, asOf: d.asOf };
+    });
+    const rows = res.filter((r) => r?.obs?.length).map((r) => {
+      const c = r.obs.map((o) => o.c);
+      return { sym: r.sym, label: r.label, src: r.src, asOf: r.asOf ?? r.obs.at(-1).t, value: r.price ?? c.at(-1), prev: c.at(-2), monthAgo: c.at(-22) ?? c[0], spark: c.slice(-30) };
+    });
+    const srcs = [...new Set(rows.map((r) => r.src))].join(' + ') || 'unavailable';
+    return { source: srcs === 'FRED' ? 'FRED daily (latest published close)' : srcs, updated: Date.now(), marketOpen: usMarketOpen(), rows };
   });
 }
 
@@ -265,7 +337,7 @@ async function liquidity() {
 const ROUTES = {
   '/api/sectors': sectors, '/api/stablecoins': stablecoins, '/api/chain-stables': chainStables,
   '/api/chains': chains, '/api/tradfi': tradfi, '/api/macro': macro, '/api/liquidity': liquidity,
-  '/api/health': async () => ({ ok: true, live: true, fred: Boolean(FRED_KEY), t: Date.now() }),
+  '/api/health': async () => ({ ok: true, live: true, fred: Boolean(FRED_KEY), alpaca: Boolean(ALPACA_ID && ALPACA_SECRET), coingecko: Boolean(CG_KEY), t: Date.now() }),
 };
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.ico': 'image/x-icon' };
 

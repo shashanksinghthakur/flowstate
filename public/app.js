@@ -28,21 +28,21 @@ function usMarketOpen(d = new Date()) {
   return m >= 570 && m < 960;
 }
 function tradAsOf() {
-  const ts = [...(S.data.tradfi?.groups || []).flatMap((g) => g.rows), ...(S.data.macro?.rows || [])].map((r) => r.asOf).filter(Boolean);
+  const ts = (S.data.tradfi?.groups || []).flatMap((g) => g.rows).map((r) => r.asOf).filter(Boolean);
   return ts.length ? Math.max(...ts) : null;
 }
 function freshness() {
   const t = tradAsOf();
   const when = t ? new Date(t).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '–';
   return usMarketOpen()
-    ? `US market open · last print ${when} · refreshes every 60s · VIX & yields may lag ~15 min`
+    ? `US market open · last print ${when} · refreshes every 60s`
     : `US market closed · prices as of ${when} · resumes Mon–Fri 9:30 ET`;
 }
 const ago = (t) => { const s = Math.round((Date.now() - t) / 1000); return s < 60 ? `${s}s ago` : `${Math.round(s / 60)}m ago`; };
 
 // ------------------------------------------------------------ components
-function dbars(rows, fmt = (v) => money(v, true)) {
-  if (!rows.length) return '<div class="empty">No data from source right now.</div>';
+function dbars(rows, fmt = (v) => money(v, true), emptyMsg = 'No data from source right now.') {
+  if (!rows.length) return `<div class="empty">${emptyMsg}</div>`;
   const max = Math.max(...rows.map((r) => Math.abs(r.value || 0)), 1);
   return `<div class="dbars">${rows.map((r) => {
     const w = (Math.abs(r.value || 0) / max) * 50;
@@ -191,7 +191,7 @@ const VIEWS = {
     return `<h1>Chains</h1><p class="lede">Dollars moving between chains, measured two ways: stablecoin balances and bridge flows.</p>
     <div class="grid">
       ${card('Stablecoin flow by chain', 'Change in USD stablecoins held on chain', dbars(cs.slice(0, 15).map((r) => ({ label: r.chain, value: r[w], tip: `${r.chain}\n${money(r[w], true)}\nSupply on chain ${money(r.supply)}` })).sort((a, b) => b.value - a.value)) + legend(), 's6', seg('chains', [['d1', '1D'], ['d7', '7D'], ['d30', '30D']]))}
-      ${card('Bridge net flow', '7D bridged in minus bridged out', dbars([...br].sort((a, b) => b.net7d - a.net7d).map((r) => ({ label: r.chain, value: r.net7d, tip: `${r.chain}\nIn ${money(r.in7d)} · Out ${money(r.out7d)}\nNet ${money(r.net7d, true)}` }))) + legend() +
+      ${card('Bridge net flow', '7D bridged in minus bridged out', dbars([...br].sort((a, b) => b.net7d - a.net7d).map((r) => ({ label: r.chain, value: r.net7d, tip: `${r.chain}\nIn ${money(r.in7d)} · Out ${money(r.out7d)}\nNet ${money(r.net7d, true)}` })), undefined, 'Bridge data moved behind DefiLlama Pro. Live on-chain stablecoin mint/burn and transfer tracking replaces this panel next.') + legend() +
         table([['Chain', (r) => esc(r.chain)], ['In 7D', (r) => money(r.in7d)], ['Out 7D', (r) => money(r.out7d)], ['Net 7D', (r) => `<span class="${cls(r.net7d)}">${money(r.net7d, true)}</span>`], ['Net 24h', (r) => `<span class="${cls(r.net1d)}">${money(r.net1d, true)}</span>`]], br), 's6')}
       ${card('DeFi TVL by chain', esc(ch.source || ''), table([['Chain', (r) => esc(r.chain)], ['TVL', (r) => money(r.tvl)], ['Token', (r) => esc(r.token || '–')]], ch.tvl || []), '')}
     </div>`;
